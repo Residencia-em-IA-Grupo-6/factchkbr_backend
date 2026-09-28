@@ -106,3 +106,31 @@ def test_lexicon_repository_decoupling():
         assert isinstance(label, str)
         assert hasattr(compiled_regex, "findall")
         assert 0.0 <= severity <= 1.0
+
+
+def test_heuristic_allcaps_short_words_and_articles():
+    analyzer = HeuristicAnalyzer()
+
+    # 1. Artigos no início de frase não devem ser contados como ALL CAPS (evita falsos positivos)
+    neutral_text = "A vacina foi testada. O médico aprovou o medicamento."
+    neutral_features = analyzer.extract_features(neutral_text)
+    assert neutral_features["allcaps_words_ratio"] == 0.0
+
+    # 2. Artigos e conjunções curtas no meio da frase em maiúsculas DEVEM ser contados
+    # 'E' e 'O' são contados, enquanto 'DNA' é excluído por ser sigla legítima
+    shouting_text = "VACINA MATA E ALTERA O DNA"
+    shouting_features = analyzer.extract_features(shouting_text)
+    # Palavras: VACINA(caps), MATA(caps), E(caps), ALTERA(caps), O(caps), DNA(sigla) = 5/6 = 0.8333
+    assert shouting_features["allcaps_words_ratio"] == 0.8333
+
+    # 3. Artigo 'A' no meio da frase
+    mid_article_text = "MÍDIA ESCONDE A VERDADE"
+    mid_article_features = analyzer.extract_features(mid_article_text)
+    assert mid_article_features["allcaps_words_ratio"] == 1.0
+
+    # 4. Caso composto com pontuação terminal e palavras curtas
+    full_sample = "🚨 URGENTE!! A MÍDIA ESCONDE QUE VACINA MATA E ALTERA O DNA HUMANO???"
+    full_features = analyzer.extract_features(full_sample)
+    # 10 tokens ALL CAPS de 12 palavras totais (A pós-ponto descartado, E e O no meio incluídos, DNA sigla excluído)
+    assert full_features["allcaps_words_ratio"] == 0.8333
+

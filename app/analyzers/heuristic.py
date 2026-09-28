@@ -1,5 +1,5 @@
 import re
-from typing import Any
+
 from app.analyzers.lexicon_repository import BaseLexiconRepository, get_lexicon_repository
 from app.core.base import BaseAnalyzer
 from app.core.registry import register_analyzer
@@ -37,14 +37,33 @@ class HeuristicAnalyzer(BaseAnalyzer):
         n_upper = sum(1 for c in letters if c.isupper())
         uppercase_ratio = (n_upper / n_letters) if n_letters > 0 else 0.0
 
-        # 2. Tokens em ALL CAPS (comprimento >= 3, excluindo siglas do repositório)
+        # 2. Tokens em ALL CAPS (comprimento >= 3 ou artigos/palavras curtas fora de início de frase/pós-ponto)
         common_acronyms = self.repository.get_acronyms()
-        words = re.findall(r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+\b", text)
+        word_matches = list(re.finditer(r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+\b", text))
+        words = [m.group(0) for m in word_matches]
         n_words = len(words)
-        allcaps_tokens = [
-            w for w in words
-            if len(w) >= 3 and w.isupper() and w not in common_acronyms
-        ]
+
+        allcaps_tokens: list[str] = []
+        for idx, match in enumerate(word_matches):
+            w = match.group(0)
+            if not w.isupper() or w in common_acronyms:
+                continue
+
+            if len(w) >= 3:
+                allcaps_tokens.append(w)
+            else:
+                # Para palavras curtas (artigos/conjunções como A, E, O, DE, NO, etc.):
+                # Considera ALL CAPS apenas quando NÃO estiver no início de frase ou após pontuação terminal (. ! ? \n …)
+                if idx == 0:
+                    is_sentence_start = True
+                else:
+                    prev_end = word_matches[idx - 1].end()
+                    separator = text[prev_end : match.start()]
+                    is_sentence_start = bool(re.search(r"[.!?…\n]", separator))
+
+                if not is_sentence_start:
+                    allcaps_tokens.append(w)
+
         allcaps_words_ratio = (len(allcaps_tokens) / n_words) if n_words > 0 else 0.0
 
         # 3. Sentenças para normalização de pontuação
@@ -129,3 +148,4 @@ class HeuristicAnalyzer(BaseAnalyzer):
             summary="Extração de métricas de sensacionalismo e estilometria para suporte a análises completas.",
             raw_details=metrics,
         )
+

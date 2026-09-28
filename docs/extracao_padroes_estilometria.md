@@ -45,9 +45,15 @@ $$\text{uppercase\_ratio} = \frac{N_{\text{upper}}}{N_{\text{letters}}}$$
 - Se $N_{\text{letters}} = 0$, retorna `0.0`.
 
 ### 3.2. Proporção de Palavras em ALL CAPS (`allcaps_words_ratio`)
-Mede o uso de palavras inteiras em caixa alta com comprimento $\ge 3$ caracteres, descartando siglas institucionais e termos técnicos comuns:
+Mede o uso de palavras inteiras em caixa alta em relação ao total de palavras:
 $$\text{allcaps\_words\_ratio} = \frac{N_{\text{allcaps}}}{N_{\text{words}}}$$
-- **Lista de Exclusão de Siglas Legítimas:** `STF`, `STJ`, `TSE`, `SUS`, `PIB`, `DF`, `EUA`, `OMS`, `ONU`, `ANVISA`, `FIOCRUZ`, `USP`, `CPI`, `UTI`, etc. Isso evita que menções a órgãos públicos inflem artificialmente a suspeição.
+
+- **Critérios de Elegibilidade de Tokens:**
+  1. **Palavras com comprimento $\ge 3$ caracteres:** São computadas como ALL CAPS se todas as letras forem maiúsculas e o termo não for uma sigla catalogada no repositório.
+  2. **Artigos, conjunções e palavras curtas ($< 3$ caracteres, ex.: `A`, `E`, `O`, `DE`, `NO`):** 
+     - **Início de frase ou pós-pontuação terminal (`.`, `!`, `?`, `\n`, `…`):** **Ignoradas** na contagem de ALL CAPS. Isso preserva a conformidade gramatical padrão da língua portuguesa (capitalização compulsória na abertura de períodos) e anula falsos positivos em notícias neutras (ex.: *"A Anvisa aprovou a vacina. O médico confirmou."*).
+     - **Meio de frase:** **Computadas** como ALL CAPS caso estejam inteiramente em maiúsculas (ex.: em *"VACINA MATA E ALTERA O DNA"*, `E` e `O` são contabilizados como grito visual / ênfase sensacionalista).
+- **Lista de Exclusão de Siglas Legítimas:** `STF`, `STJ`, `TSE`, `SUS`, `PIB`, `DF`, `EUA`, `OMS`, `ONU`, `ANVISA`, `FIOCRUZ`, `USP`, `CPI`, `UTI`, `DNA`, etc. Evita que menções a órgãos públicos, estados ou termos científicos inflem a métrica.
 
 ### 3.3. Contagem de Pontuação Excessiva (`excessive_punctuation_count`)
 Mede a quantidade de sequências atípicas de pontuação repetida, expressas pela expressão regular:
