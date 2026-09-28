@@ -14,7 +14,8 @@ class FactCheckOrchestrator:
     Orquestrador / Ensemble responsável por:
     1. Carregar os analisadores ativos definidos nas configurações (.env).
     2. Executar os modelos em paralelo (asyncio.gather).
-    3. Consolidar os resultados em um veredito final ponderado.
+    3. Consolidar os resultados em um veredito final ponderado, ignorando
+       analisadores que atuam puramente como extratores de features (sem veredito).
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -59,26 +60,36 @@ class FactCheckOrchestrator:
     def _consolidate(self, text: str, results: list[AnalyzerResult]) -> AnalyzeResponse:
         """
         Consolida os resultados individuais através de ensemble ponderado / consenso.
+        Filtra apenas analisadores que emitiram veredito concreto.
         """
         all_reasons: list[str] = []
         all_sources: list[str] = []
-        dominant_verdict = Verdict.INCONCLUSIVO
-        avg_confidence = 0.5
 
-        if results:
-            first = results[0]
+        # Coleta todas as razões e fontes (incluindo analisadores de apoio/features)
+        for r in results:
+            all_reasons.extend(r.reasons)
+            all_sources.extend(r.sources)
+
+        # Filtra apenas os analisadores que emitem veredito
+        verdict_bearing_results = [r for r in results if r.verdict is not None]
+
+        if verdict_bearing_results:
+            # Seleciona o veredito dos modelos decisores
+            first = verdict_bearing_results[0]
             dominant_verdict = first.verdict
-            avg_confidence = sum(r.confidence for r in results) / len(results)
-
-            for r in results:
-                all_reasons.extend(r.reasons)
-                all_sources.extend(r.sources)
+            avg_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
+            summary = f"Análise consolidada por {len(verdict_bearing_results)} modelo(s) decisor(es) com apoio de {len(results) - len(verdict_bearing_results)} módulo(s) de features."
+        else:
+            # Caso nenhum modelo tenha emitido veredito (ex: apenas HeuristicAnalyzer ativo)
+            dominant_verdict = Verdict.INCONCLUSIVO
+            avg_confidence = 0.5
+            summary = "Extração de features concluída; nenhum modelo decisor emitiu veredito final."
 
         return AnalyzeResponse(
             claim=text[:120],
             verdict=dominant_verdict,
             confidence=round(avg_confidence, 2),
-            summary=f"Análise estrutural processada por {len(results)} modelo(s).",
+            summary=summary,
             reasons=list(dict.fromkeys(all_reasons)),
             sources=list(dict.fromkeys(all_sources))
         )

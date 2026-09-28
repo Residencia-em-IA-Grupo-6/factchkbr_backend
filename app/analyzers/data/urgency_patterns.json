@@ -1,0 +1,174 @@
+{
+  "version": "1.0.0",
+  "description": "Léxico e padrões de sensacionalismo, apelo à urgência e desinformação",
+  "patterns": [
+    {
+      "id": "urg_01",
+      "label": "urgente",
+      "regex": "\\burgente\\b",
+      "category": "gatilho_urgencia",
+      "severity": 0.8,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_02",
+      "label": "compartilhe",
+      "regex": "\\bcompartilhe\\b|\\bcompartilhem\\b",
+      "category": "viralizacao",
+      "severity": 0.7,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_03",
+      "label": "repasse",
+      "regex": "\\brepasse\\b|\\brepassem\\b|\\brepasse para todos\\b",
+      "category": "viralizacao",
+      "severity": 0.75,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_04",
+      "label": "a mídia esconde",
+      "regex": "\\ba\\s+(?:grande\\s+)?m[ií]dia\\s+(?:esconde|n[aã]o\\s+mostra)\\b",
+      "category": "deslegitimacao_imprensa",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_05",
+      "label": "bomba",
+      "regex": "\\bbomba\\b",
+      "category": "sensacionalismo",
+      "severity": 0.7,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_06",
+      "label": "veja antes que apaguem",
+      "regex": "\\b(?:veja|leia|assista)\\s+antes\\s+que\\s+apaguem\\b|\\bantes\\s+que\\s+apaguem\\b",
+      "category": "gatilho_urgencia",
+      "severity": 0.9,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_07",
+      "label": "não vai passar na tv",
+      "regex": "\\bn[aã]o\\s+vai\\s+passar\\s+na\\s+tv\\b",
+      "category": "deslegitimacao_imprensa",
+      "severity": 0.8,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_08",
+      "label": "alerta geral",
+      "regex": "\\balerta\\s+geral\\b|\\bcuidado\\s+urgente\\b",
+      "category": "gatilho_urgencia",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_09",
+      "label": "acabou de sair",
+      "regex": "\\bacabou\\s+de\\s+(?:sair|vazar|acontecer)\\b",
+      "category": "sensacionalismo",
+      "severity": 0.7,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_10",
+      "label": "chocante",
+      "regex": "\\bchocante\\b|\\besc[aâ]ndalo\\b|\\babsurdo\\b",
+      "category": "sensacionalismo",
+      "severity": 0.65,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_11",
+      "label": "cura secreta",
+      "regex": "\\bcura\\s+secreta\\b|\\bm[eé]dicos\\s+escondem\\b|\\brem[eé]dio\\s+secreto\\b",
+      "category": "desinformacao_saude",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_12",
+      "label": "cura milagrosa/câncer",
+      "regex": "\\bcura\\s+(?:do\\s+)?c[aâ]ncer\\b|\\bcura\\s+(?:da\\s+)?covid\\b|\\bcura\\s+imediata\\b",
+      "category": "desinformacao_saude",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_13",
+      "label": "verdade oculta",
+      "regex": "\\bverdade\\s+oculta\\b|\\bconspira[cç][aã]o\\b|\\bo\\s+que\\s+eles\\s+n[aã]o\\s+querem\\s+que\\s+voc[eê]\\s+saiba\\b",
+      "category": "teoria_conspiratoria",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_14",
+      "label": "você não vai acreditar",
+      "regex": "\\bvoc[eê]\\s+n[aã]o\\s+vai\\s+acreditar\\b|\\binacredit[aá]vel\\b",
+      "category": "clickbait",
+      "severity": 0.6,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_15",
+      "label": "fraude confirmada",
+      "regex": "\\bfraude\\s+confirmada\\b|\\bacordem\\s+povo\\b",
+      "category": "teoria_conspiratoria",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_16",
+      "label": "salve sua família",
+      "regex": "\\bsalve\\s+sua\\s+fam[ií]lia\\b|\\bperigo\\s+imediato\\b",
+      "category": "apelo_emocional",
+      "severity": 0.8,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_17",
+      "label": "altera dna/genético",
+      "regex": "\\baltera\\s+(?:o\\s+)?dna\\b|\\bc[oó]digo\\s+gen[eé]tico\\b",
+      "category": "desinformacao_saude",
+      "severity": 0.9,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_18",
+      "label": "vacina mata/veneno",
+      "regex": "\\bvacina\\s+mata\\b|\\bvacinas\\s+matam\\b|\\bveneno\\s+na\\s+vacina\\b",
+      "category": "panico_vacinal",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_19",
+      "label": "cloroquina/ivermectina milagrosa",
+      "regex": "\\bcloroquina\\s+cura\\b|\\bivermectina\\s+cura\\b|\\btratamento\\s+precoce\\s+salva\\b",
+      "category": "desinformacao_saude",
+      "severity": 0.9,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_20",
+      "label": "anvisa/oms proibiu ou esconde",
+      "regex": "\\banvisa\\s+(?:esconde|proibiu)\\b|\\boms\\s+(?:esconde|admite)\\b",
+      "category": "deslegitimacao_orgaos",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_21",
+      "label": "chip/grafeno em vacina",
+      "regex": "\\b(?:chip|microchip|grafeno)\\b",
+      "category": "teoria_conspiratoria",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
+    }
+  ]
+}

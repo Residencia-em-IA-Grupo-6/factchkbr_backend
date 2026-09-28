@@ -26,11 +26,18 @@ factchkbr_backend/
 │   │   ├── base.py              # Interface abstrata BaseAnalyzer (ABC)
 │   │   ├── registry.py          # Registro dinâmico de analisadores disponíveis (@register_analyzer)
 │   │   └── orchestrator.py      # Orquestrador/Ensemble que executa os modelos e consolida o veredito
-│   └── analyzers/               # Pasta onde novos algoritmos serão adicionados
+│   └── analyzers/               # Pasta onde algoritmos e léxicos residem
 │       ├── __init__.py
 │       ├── heuristic.py         # Analisador 1: Regras e Heurísticas de texto (clickbait, sensacionalismo)
 │       ├── fact_check_api.py    # Analisador 2: Consulta a bases externas / APIs de checagem
-│       └── llm_judge.py         # Analisador 3: Avaliador via LLM / Modelo de NLP
+│       ├── llm_judge.py         # Analisador 3: Avaliador via LLM / Modelo de NLP
+│       ├── lexicon_repository.py # Repositório desacoplado de léxicos (preparado para Banco de Dados)
+│       └── data/                # Dados e dicionários desacoplados
+│           ├── acronyms.json    # Acrônimos legítimos categorizados
+│           └── urgency_patterns.json # Padrões regex de urgência com severidade
+├── docs/
+│   ├── extracao_padroes_estilometria.md # Documentação da extração empírica de padrões
+│   └── arquitetura_banco_padroes.md     # Modelagem e arquitetura de Banco de Dados escalável
 ├── tests/
 │   ├── __init__.py
 │   ├── test_api.py              # Testes dos endpoints e conformidade de contrato
