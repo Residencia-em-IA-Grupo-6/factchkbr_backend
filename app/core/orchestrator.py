@@ -38,6 +38,8 @@ class FactCheckOrchestrator:
     async def analyze(self, text: str, urls: list[str]) -> AnalyzeResponse:
         """
         Executa os analisadores ativos e consolida o veredito.
+        Se claim_extractor estiver presente, ele extrai a alegação factual central primeiro
+        e repassa para os analisadores de checagem/LLM.
         """
         active_analyzers = self.get_active_analyzers()
 
@@ -51,9 +53,31 @@ class FactCheckOrchestrator:
                 sources=[]
             )
 
-        # Execução assíncrona concorrente dos modelos
-        tasks = [analyzer.analyze(text, urls) for analyzer in active_analyzers]
-        results: list[AnalyzerResult] = await asyncio.gather(*tasks, return_exceptions=False)
+        # Se claim_extractor estiver ativo, isola a alegação factual primeiro
+        extractor = next((a for a in active_analyzers if a.name == "claim_extractor"), None)
+        other_analyzers = [a for a in active_analyzers if a.name != "claim_extractor"]
+
+        results: list[AnalyzerResult] = []
+        target_claim = text
+
+        if extractor:
+            extractor_result = await extractor.analyze(text, urls)
+            results.append(extractor_result)
+            if extractor_result.claim:
+                target_claim = extractor_result.claim
+
+        if other_analyzers:
+            # Analisadores estilísticos/heurísticos analisam o texto bruto com formatação;
+            # APIs de checagem e LLMs analisam a alegação factual isolada.
+            tasks = []
+            for analyzer in other_analyzers:
+                if analyzer.name == "heuristic":
+                    tasks.append(analyzer.analyze(text, urls))
+                else:
+                    tasks.append(analyzer.analyze(target_claim, urls))
+
+            other_results: list[AnalyzerResult] = await asyncio.gather(*tasks, return_exceptions=False)
+            results.extend(other_results)
 
         return self._consolidate(text, results)
 
@@ -64,11 +88,14 @@ class FactCheckOrchestrator:
         """
         all_reasons: list[str] = []
         all_sources: list[str] = []
+        primary_claim: str | None = None
 
-        # Coleta todas as razões e fontes (incluindo analisadores de apoio/features)
+        # Coleta todas as razões, fontes e alegação isolada
         for r in results:
             all_reasons.extend(r.reasons)
             all_sources.extend(r.sources)
+            if r.claim and not primary_claim:
+                primary_claim = r.claim
 
         # Filtra apenas os analisadores que emitem veredito
         verdict_bearing_results = [r for r in results if r.verdict is not None]
@@ -86,10 +113,11 @@ class FactCheckOrchestrator:
             summary = "Extração de features concluída; nenhum modelo decisor emitiu veredito final."
 
         return AnalyzeResponse(
-            claim=text[:120],
+            claim=primary_claim or text[:120],
             verdict=dominant_verdict,
             confidence=round(avg_confidence, 2),
             summary=summary,
             reasons=list(dict.fromkeys(all_reasons)),
             sources=list(dict.fromkeys(all_sources))
         )
+

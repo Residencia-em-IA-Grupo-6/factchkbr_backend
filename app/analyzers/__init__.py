@@ -1,3 +1,4 @@
+from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
 from app.analyzers.heuristic import HeuristicAnalyzer
 from app.analyzers.fact_check_api import FactCheckApiAnalyzer
 from app.analyzers.llm_judge import LlmJudgeAnalyzer
@@ -9,6 +10,7 @@ from app.analyzers.lexicon_repository import (
 )
 
 __all__ = [
+    "ClaimExtractorAnalyzer",
     "HeuristicAnalyzer",
     "FactCheckApiAnalyzer",
     "LlmJudgeAnalyzer",
@@ -17,3 +19,4 @@ __all__ = [
     "DatabaseLexiconRepository",
     "get_lexicon_repository",
 ]
+

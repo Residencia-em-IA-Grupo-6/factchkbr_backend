@@ -28,6 +28,7 @@ factchkbr_backend/
 │   │   └── orchestrator.py      # Orquestrador/Ensemble que executa os modelos e consolida o veredito
 │   └── analyzers/               # Pasta onde algoritmos e léxicos residem
 │       ├── __init__.py
+│       ├── claim_extractor.py   # Extrator Factual: Motor morfológico adaptativo em PT-BR
 │       ├── heuristic.py         # Analisador 1: Regras e Heurísticas de texto (clickbait, sensacionalismo)
 │       ├── fact_check_api.py    # Analisador 2: Consulta a bases externas / APIs de checagem
 │       ├── llm_judge.py         # Analisador 3: Avaliador via LLM / Modelo de NLP

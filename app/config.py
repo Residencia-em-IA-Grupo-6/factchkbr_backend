@@ -20,8 +20,9 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
 
     # Lista de analisadores ativos separados por vírgula
-    # Ex: "heuristic,fact_check_api,llm_judge"
-    ACTIVE_ANALYZERS: str = "heuristic,fact_check_api,llm_judge"
+    # Ex: "claim_extractor,heuristic,fact_check_api,llm_judge"
+    ACTIVE_ANALYZERS: str = "claim_extractor,heuristic,fact_check_api,llm_judge"
+
 
     # Chaves e integrações com APIs externas
     GOOGLE_FACTCHECK_API_KEY: str | None = None

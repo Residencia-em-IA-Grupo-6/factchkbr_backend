@@ -23,9 +23,11 @@ async def test_base_analyzer_inheritance():
 def test_registry_discovery():
     registry.auto_discover("app.analyzers")
     available = registry.list_available()
+    assert "claim_extractor" in available
     assert "heuristic" in available
     assert "fact_check_api" in available
     assert "llm_judge" in available
+
 
 
 @pytest.mark.asyncio
@@ -133,4 +135,83 @@ def test_heuristic_allcaps_short_words_and_articles():
     full_features = analyzer.extract_features(full_sample)
     # 10 tokens ALL CAPS de 12 palavras totais (A pós-ponto descartado, E e O no meio incluídos, DNA sigla excluído)
     assert full_features["allcaps_words_ratio"] == 0.8333
+
+
+@pytest.mark.asyncio
+async def test_claim_extractor_adaptive_morphology():
+    """Verifica se o extrator detecta verbos dinâmicos sem listas engessadas (morfologia verbal)."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    # Verbos não listados estaticamente: colidiu, faliu, foram confiscados, aumentará
+    texts = [
+        "O avião monomotor colidiu com uma torre de transmissão.",
+        "A empresa aérea faliu após dívida bilionária no exterior.",
+        "Os bens do empresário foram confiscados pela Receita Federal.",
+        "A Petrobras aumentará o valor do diesel na próxima segunda-feira.",
+        "O ministro acabou de suspender todos os pagamentos.",
+    ]
+
+    for t in texts:
+        result = await extractor.analyze(t, [])
+        assert result.claim is not None, f"Falha ao isolar alegação com verbo morfológico: {t}"
+        assert result.raw_details["extracted_claim"] != ""
+        assert result.raw_details["claims_found"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_claim_extractor_factual_isolation():
+    """Verifica isolamento da alegação removendo lixo sensacionalista, alertas e apelos."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    sample = (
+        "🚨🚨 ATENÇÃO BRASIL! COMPARTILHEM ANTES QUE APAGUEM!! "
+        "O governo federal aprovou aumento de 20% no combustível. "
+        "Não deixe a mídia esconder! Repassem já!!"
+    )
+
+    result = await extractor.analyze(sample, [])
+    assert result.claim is not None
+    assert "aumento de 20% no combustível" in result.claim
+    assert "COMPARTILHEM" not in result.claim
+    assert "🚨" not in result.claim
+    assert "Repassem" not in result.claim
+
+
+@pytest.mark.asyncio
+async def test_claim_extractor_opinion_and_noise_filtering():
+    """Garante que frases que são puramente opinativas ou saudações não sejam marcadas como fatos."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    opinions = [
+        "Bom dia a todos, que Deus abençoe nossa nação maravilhosa!",
+        "Eu acho esse político muito incompetente e antipático.",
+        "Que absurdo inacreditável, que vergonha esse país!",
+    ]
+
+    for op in opinions:
+        result = await extractor.analyze(op, [])
+        assert result.claim is None
+        assert result.raw_details["claims_found"] == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_claim_propagation():
+    """Verifica se o Orchestrator utiliza a claim extraída pelo ClaimExtractor."""
+    from app.config import Settings
+    custom_settings = Settings(ACTIVE_ANALYZERS="claim_extractor,heuristic,fact_check_api,llm_judge")
+    orchestrator = FactCheckOrchestrator(settings=custom_settings)
+
+    raw_message = (
+        "URGENTE!! BOMBA!! VEJA ANTES QUE APAGUEM! "
+        "A Anvisa proibiu a venda de lote de azeite adulterado no país."
+    )
+
+    response = await orchestrator.analyze(raw_message, [])
+    assert "proibiu a venda" in response.claim
+    assert "URGENTE" not in response.claim
+    assert "BOMBA" not in response.claim
+
 
