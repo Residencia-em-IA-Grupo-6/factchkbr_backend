@@ -41,6 +41,12 @@ RE_ALARM_HEADERS = re.compile(
     re.IGNORECASE,
 )
 
+RE_CONVERSATIONAL_PREFIX = re.compile(
+    r"^(?:(?:não adianta brigar(?: comigo)?|não adianta reclamar|não adianta chiar|"
+    r"só digo uma coisa|acredite se quiser|falo a verdade|ouça bem|prestem atenção)[!.:\s,;-]*)+",
+    re.IGNORECASE,
+)
+
 OPINION_PATTERNS = re.compile(
     r"\b(?:eu acho|eu acredito|minha opinião|penso que|na minha visão|vergonha|absurdo|"
     r"maravilhosa|abençoe|deus abençoe|que deus|lindo demais|horroroso|incompetente e antipático)\b",
@@ -137,8 +143,9 @@ class SpacyPreprocessor:
         t = re.sub(r"\.{2,}", ".", t)
         t = RE_WHITESPACE.sub(" ", t).strip()
 
-        # Remove alertas de topo repetidos (ex: BOMBA!! URGENTE: ...)
+        # Remove alertas de topo repetidos e bordões conversacionais iniciais
         t = RE_ALARM_HEADERS.sub("", t).strip()
+        t = RE_CONVERSATIONAL_PREFIX.sub("", t).strip()
         t = re.sub(r"^[\s,;.:-]+", "", t).strip()
         return t
 
@@ -222,7 +229,11 @@ Sua única responsabilidade é processar textos pré-filtrados e decompô-los em
    - NUNCA invente fatos ausentes. Preserve estritamente entidades, locais, datas e números informados no texto original.
    - Se uma fonte for vaga ("médicos afirmam"), preserve a fonte genérica ("médicos não identificados").
 
-4. FORMATAÇÃO E ESTRUTURA:
+4. PRIORIDADE FACTUAL & DESCARTE DE RUÍDO CONVERSACIONAL:
+   - Desabafos, provocações interpessoais ou bordões conversacionais (ex: 'não adianta brigar comigo', 'acredite se quiser', 'ouça bem', 'só digo isso') NÃO possuem teor factual falseável.
+   - Marque-os com 'is_check_worthy: false' ou descarte-os, priorizando como asserção principal (id 1) o fato substantivo falseável sobre o mundo real (saúde, ciência, política, economia, crimes, etc.).
+
+5. FORMATAÇÃO E ESTRUTURA:
    - Responda EXCLUSIVAMENTE em formato JSON com a chave raiz 'assertions'.
    - Cada objeto deve conter 'id', 'statement', 'triple' (com subject, predicate, object), 'suggested_source_types' e 'is_check_worthy'."""
 
@@ -378,6 +389,50 @@ class LLMClaimDecomposer:
         return assertions
 
 
+def select_primary_assertion(assertions: list[AtomicAssertion]) -> AtomicAssertion | None:
+    """
+    Seleciona a asserção central para checagem, priorizando proposições substantivas
+    do mundo real (saúde, ciência, política, etc.) sobre ruídos conversacionais ou metadados de citação.
+    """
+    if not assertions:
+        return None
+
+    # 1. Filtra asserções que o modelo marcou como dignas de verificação
+    candidates = [a for a in assertions if a.is_check_worthy] or assertions
+
+    CONVERSATIONAL_TERMS = {"brigar", "conversar", "falar", "dizer", "ouvir", "achar", "pensar"}
+    SUBSTANTIVE_TERMS = {
+        "vacina", "autismo", "saúde", "remédio", "doença", "vírus", "medicamento",
+        "governo", "lei", "ministério", "stf", "anvisa", "ibge", "ipea", "pib", "crime",
+        "morte", "hospital", "bula", "efeito", "estudo"
+    }
+
+    def score_assertion(a: AtomicAssertion) -> int:
+        score = 0
+        stmt = a.statement.lower()
+        pred = a.triple.predicate.lower()
+        subj = a.triple.subject.lower()
+
+        # Penaliza ruídos conversacionais
+        if any(v in pred or v in subj or v in stmt for v in CONVERSATIONAL_TERMS):
+            score -= 15
+
+        # Bonifica termos substantivos de interesse público
+        score += sum(10 for t in SUBSTANTIVE_TERMS if t in stmt or t in subj)
+
+        # Bonifica fontes oficiais sugeridas (ex: Anvisa, OMS)
+        if a.suggested_source_types:
+            score += 5 * len(a.suggested_source_types)
+
+        # Se for mera citação de suporte (ex: "está na bula", "afirmação está", "disse que"), pequena penalidade frente ao mérito
+        if any(meta in stmt for meta in ("está na bula", "consta na bula", "afirmação está", "disse que")):
+            score -= 5
+
+        return score
+
+    return max(candidates, key=score_assertion)
+
+
 # ==============================================================================
 # 3. ANALISADOR REGISTRADO (BaseAnalyzer)
 # ==============================================================================
@@ -453,7 +508,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
         """Interface padrão do BaseAnalyzer consumida pelo FactCheckOrchestrator."""
         contract = await self.extract_contract(text)
-        primary_assertion = contract.assertions[0] if contract.assertions else None
+        primary_assertion = select_primary_assertion(contract.assertions)
         primary_claim = primary_assertion.statement if primary_assertion else None
 
         return AnalyzerResult(
