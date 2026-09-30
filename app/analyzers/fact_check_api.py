@@ -47,12 +47,14 @@ TRUSTED_MEDIA_DOMAINS = {
     "boatos": "Boatos.org",
     "comprova": "Projeto Comprova",
     "afp": "AFP Checamos",
-    # Autoridades Sanitárias, Científicas e Oficiais
+    # Autoridades Sanitárias, Científicas, Estatísticas e Oficiais
     "who": "Organização Mundial da Saúde (WHO/OMS)",
     "paho": "Organização Pan-Americana da Saúde (OPAS)",
     "webmd": "WebMD Health",
     "fiocruz": "Fiocruz",
     "anvisa": "Anvisa",
+    "ibge": "IBGE (Instituto Brasileiro de Geografia e Estatística)",
+    "ipea": "Ipea (Instituto de Pesquisa Econômica Aplicada)",
     "saude.gov": "Ministério da Saúde",
     "gov.br": "Portal Gov.br / Órgão Oficial",
 }
@@ -154,22 +156,46 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
     async def search_lateral_reading(self, query: str) -> list[EvidenceItem]:
         """
-        Executa Leitura Horizontal em fontes confiáveis (G1, Folha, Estadão, BBC, WHO, WebMD, Fiocruz, Anvisa)
-        utilizando busca jornalística agregada para obter matérias de apuração em tempo real.
+        Executa Leitura Horizontal em fontes confiáveis (G1, Folha, Estadão, BBC, WHO, Fiocruz, Anvisa, IBGE, Ipea)
+        utilizando busca agregada para obter matérias de apuração e dados oficiais em tempo real.
         """
-        # Limpa termos redundantes de busca para maximizar recall
         clean_q = re.sub(r"[\"']", "", query)
         encoded_query = urllib.parse.quote(clean_q[:160])
         rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
 
+        tasks = [self._fetch_rss(rss_url, max_items=8)]
+
+        # Se contiver termos estatísticos ou econômicos, realiza busca complementar direcionada ao IBGE e Ipea
+        is_stat = bool(
+            re.search(
+                r"\b(?:pib|inflação|ipca|desemprego|saúde|educação|gastos?|orçamento|taxa|censo|população|salário)\b",
+                clean_q,
+                re.IGNORECASE,
+            )
+        )
+        if is_stat:
+            stat_query = f"(site:ibge.gov.br OR site:ipea.gov.br) {clean_q[:80]}"
+            stat_url = f"https://news.google.com/rss/search?q={urllib.parse.quote(stat_query)}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+            tasks.append(self._fetch_rss(stat_url, max_items=4, force_official=True))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        evidences: list[EvidenceItem] = []
+        for res in results:
+            if isinstance(res, list):
+                evidences.extend(res)
+
+        return evidences
+
+    async def _fetch_rss(self, url: str, max_items: int = 8, force_official: bool = False) -> list[EvidenceItem]:
+        """Recupera e processa itens de um feed RSS de notícias."""
         evidences: list[EvidenceItem] = []
         try:
-            resp = await self.http_client.get(rss_url)
+            resp = await self.http_client.get(url)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.text)
                 items = root.findall(".//item")
 
-                for it in items[:8]:
+                for it in items[:max_items]:
                     title_elem = it.find("title")
                     link_elem = it.find("link")
                     source_elem = it.find("source")
@@ -180,7 +206,12 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                     source_name = source_elem.text if source_elem is not None else "Imprensa"
                     pub_date = pub_elem.text if pub_elem is not None else None
 
-                    # Identifica se o veículo pertence à lista de fontes confiáveis
+                    if force_official:
+                        if "ibge.gov.br" in link.lower() or "ibge" in source_name.lower():
+                            source_name = "IBGE (Dados Oficiais)"
+                        elif "ipea.gov.br" in link.lower() or "ipea" in source_name.lower():
+                            source_name = "Ipea (Dados Oficiais)"
+
                     is_trusted = any(dom in source_name.lower() or dom in link.lower() for dom in TRUSTED_MEDIA_DOMAINS)
                     is_fact_check = (
                         any(fc in title.lower() for fc in ("fato ou fake", "verifica", "confere", "comprova", "checagem"))
@@ -199,13 +230,18 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                         )
                     )
         except Exception as e:
-            logger.debug("Falha na leitura horizontal de notícias: %s", e)
+            logger.debug("Falha na leitura horizontal de notícias (%s): %s", url, e)
 
         return evidences
 
-    def evaluate_verdict(self, evidences: list[EvidenceItem]) -> tuple[Verdict, float, list[str]]:
+    def evaluate_verdict(
+        self,
+        evidences: list[EvidenceItem],
+        claim: str = "",
+    ) -> tuple[Verdict, float, list[str]]:
         """
         Calcula o veredito e nível de confiança a partir das evidências consolidadas.
+        Calibrado para evitar falsos positivos de confirmação em alegações numéricas/estatísticas.
         """
         if not evidences:
             return (
@@ -238,25 +274,43 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 return Verdict.SUSPEITO, 0.85, reasons
 
         # 2. Leitura Horizontal em Veículos de Referência e Órgãos Oficiais
-        debunk_count = sum(1 for e in evidences if DEBUNK_TITLE_PATTERNS.search(e.title))
-        confirm_count = sum(1 for e in evidences if CONFIRM_TITLE_PATTERNS.search(e.title))
+        is_quantitative = bool(
+            re.search(r"\b(?:\d+[%,\.]?\d*|por\s*cento|pib|taxa|índice|gasto)\b", claim, re.IGNORECASE)
+        )
 
-        if debunk_count >= 1:
-            matching = [e for e in evidences if DEBUNK_TITLE_PATTERNS.search(e.title)]
+        debunk_matching = [e for e in evidences if DEBUNK_TITLE_PATTERNS.search(e.title)]
+
+        confirm_matching: list[EvidenceItem] = []
+        for e in evidences:
+            if CONFIRM_TITLE_PATTERNS.search(e.title):
+                if is_quantitative:
+                    # Em alegações quantitativas/numéricas, evita falsos positivos de verbos genéricos (ex.: 'aprova orçamento')
+                    # Exige que seja de checador oficial ou que haja sobreposição temática específica dos termos substantivos
+                    claim_words = [
+                        w.lower() for w in re.findall(r"\b\w{4,}\b", claim)
+                        if w.lower() not in ("aproximadamente", "brasil", "sobre", "entre", "quando", "foram", "disse")
+                    ]
+                    title_lower = e.title.lower()
+                    overlap = sum(1 for w in claim_words if w in title_lower)
+                    if e.is_fact_check or overlap >= 2:
+                        confirm_matching.append(e)
+                else:
+                    confirm_matching.append(e)
+
+        if debunk_matching:
             reasons = [
                 f"Leitura horizontal ({m.source_name}): aponta desmentido ou contestação na matéria \"{m.title}\"."
-                for m in matching[:2]
+                for m in debunk_matching[:2]
             ]
-            confidence = 0.90 if debunk_count >= 2 else 0.80
+            confidence = 0.90 if len(debunk_matching) >= 2 else 0.80
             return Verdict.FAKE, confidence, reasons
 
-        if confirm_count >= 1:
-            matching = [e for e in evidences if CONFIRM_TITLE_PATTERNS.search(e.title)]
+        if confirm_matching:
             reasons = [
                 f"Leitura horizontal ({m.source_name}): confirmação de atos ou ocorrência em \"{m.title}\"."
-                for m in matching[:2]
+                for m in confirm_matching[:2]
             ]
-            confidence = 0.88 if confirm_count >= 2 else 0.78
+            confidence = 0.88 if len(confirm_matching) >= 2 else 0.78
             return Verdict.VERDADEIRO, confidence, reasons
 
         # 3. Caso haja matérias encontradas mas sem sinal claro de confirmação ou desmentido
@@ -284,7 +338,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         all_evidences = google_evidences + lateral_evidences
 
         # 2. Avalia veredito e confiança baseado no conjunto de evidências
-        verdict, confidence, reasons = self.evaluate_verdict(all_evidences)
+        verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=text)
 
         # 3. Consolida fontes para exibição
         sources_list: list[str] = []
