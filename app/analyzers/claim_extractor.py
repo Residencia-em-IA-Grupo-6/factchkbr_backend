@@ -14,6 +14,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import httpx
+import spacy
 
 from app.config import get_settings
 from app.core.base import BaseAnalyzer
@@ -29,10 +30,16 @@ from app.schemas.claim_extraction import (
 logger = logging.getLogger("factchkbr.analyzers.claim_extractor")
 
 # ==============================================================================
-# PADRÕES REGEX & MORFOLOGIA VERBAL (GATEKEEPER & FALLBACK OFFLINE)
+# LIMPEZA & PADRÕES DE ALARME / RUÍDO (CPU)
 # ==============================================================================
 
 RE_ALARM_SYMBOLS = re.compile(r"[🚨⚠️💣🔥🛑📢👀⚡🇧🇷❌‼️⁉️]+")
+RE_PUNCT_COLLAPSE = re.compile(r"([!?.]){2,}")
+RE_WHITESPACE = re.compile(r"\s+")
+RE_ALARM_HEADERS = re.compile(
+    r"^(?:(?:URGENTE|BOMBA|ALERTA|ATENÇÃO BRASIL|VEJA|OLHE|COMPARTILHEM?|REPASSEM?)[!.:\s-]*)+",
+    re.IGNORECASE,
+)
 
 OPINION_PATTERNS = re.compile(
     r"\b(?:eu acho|eu acredito|minha opinião|penso que|na minha visão|vergonha|absurdo|"
@@ -40,146 +47,21 @@ OPINION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Padrões de ruídos sensacionalistas, emojis e apelos à ação
-NOISE_PATTERNS = re.compile(
-    r"\b(?:"
-    r"compartilhe[ms]?|repass[ae][ms]?|divulgu?e[ms]?|espalh[ae][ms]?|viraliz[ae][ms]?|"
-    r"veja[ms]? antes que apaguem|veja[ms]?|olh[ae][ms]?|assist[ae][ms]?|acord[ae][ms]?|salv[ae][ms]?|"
-    r"antes que apaguem|apaguem|"
-    r"não deixe[ms]? de (?:repassar|compartilhar)|não deixe a mídia esconder|mande[ms]? para todos|leia[ms]?|"
-    r"cliqu[ae][ms]?|acess[ae][ms]?|"
-    r"(?:a\s+)?(?:grande\s+|tradicional\s+)?m[ií]dia\s+(?:n[aã]o\s+vai\s+(?:mostrar|noticiar|passar|falar)|esconde|n[aã]o\s+mostra|cala|abafa)|"
-    r"n[aã]o\s+passa\s+na\s+tv|a\s+tv\s+n[aã]o\s+mostra|a\s+globo\s+n[aã]o\s+mostra|"
-    r"bom dia|boa tarde|boa noite|ol[aá] pessoal|ol[aá] a todos|paz do senhor|"
-    r"gra[cç]as a deus|am[eé]m|fwd|encaminhad[ao]|"
-    r"que vergonha|que absurdo|inaceit[aá]vel|inacredit[aá]vel|isso é uma vergonha|"
-    r"isso é um absurdo|parabéns aos envolvidos|deus nos livre|deus nos acuda|"
-    r"vamos orar|temos que orar|oremos|lament[aá]vel|vergonhoso|"
-    r"urgente|bomba|alerta|aten[cç][aã]o brasil|aten[cç][aã]o|cuidado|"
-    r"voc[eê] sabia|voc[eê]s sabiam|at[eé] quando|o que acham|ser[aá] verdade|ser[aá] que"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Voz Passiva Analítica: auxiliar + particípio
-PASSIVE_VOICE_PATTERN = re.compile(
-    r"\b(?:foi|foram|é|são|será|serão|está sendo|estão sendo|acaba de ser|acabou de ser)\s+"
-    r"(?:[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+(?:ado|ada|ados|adas|ido|ida|idos|idas)|"
-    r"preso|presa|presos|presas|morto|morta|mortos|mortas|eleito|eleita|eleitos|eleitas|"
-    r"feito|feita|feitos|feitas|dito|dita|ditos|ditas|visto|vista|vistos|vistas|"
-    r"descoberto|descoberta|descobertos|descobertas|suspenso|suspensa|suspensos|suspensas|"
-    r"confiscado|confiscada|confiscados|confiscadas|interceptado|interceptada)\b",
-    re.IGNORECASE,
-)
-
-# Locuções Verbais de Ação
-VERBAL_PERIPHRASIS_PATTERN = re.compile(
-    r"\b(?:está|estão|estava|estavam|vem|vêm|vinha|vinham|começou a|começaram a|acabou de|acabaram de|"
-    r"tentou|tentaram|pretende|pretendem|decidiu|decidiram|vai|vão|podem?)\s+"
-    r"[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+(?:ando|endo|indo|ar|er|ir)\b",
-    re.IGNORECASE,
-)
-
-# Sufixos Verbais Indicativos
-PAST_INDICATIVE_SUFFIXES = re.compile(
-    r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ou|aram|eu|eram|iu|iram)\b",
-    re.IGNORECASE,
-)
-IMPERFECT_INDICATIVE_SUFFIXES = re.compile(
-    r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ava|avam|ia|iam)\b",
-    re.IGNORECASE,
-)
-FUTURE_INDICATIVE_SUFFIXES = re.compile(
-    r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ará|arão|erá|erão|irá|irão)\b",
-    re.IGNORECASE,
-)
-
-# Verbos Irregulares no Passado
-PAST_IRREGULAR_VERBS = re.compile(
-    r"\b(?:disse|disseram|teve|tiveram|esteve|estiveram|fez|fizeram|deu|deram|"
-    r"pôs|puseram|trouxe|trouxeram|veio|vieram|viu|viram|ouviu|ouviram|"
-    r"quis|quiseram|pôde|puderam|soube|souberam|houve)\b",
-    re.IGNORECASE,
-)
-
-# Verbos de Ação / Declaração / Fato no Presente do Indicativo
-PRESENT_DECLARATIVE_VERBS = re.compile(
-    r"\b(?:"
-    r"extrai|extraem|come|comem|consome|consomem|bebe|bebem|ingere|ingerem|"
-    r"retira|retiram|remove|removem|opera|operam|injeta|injetam|aplica|aplicam|"
-    r"toma|tomam|usa|usam|engole|engolem|vomita|vomitam|infecta|infectam|"
-    r"contamina|contaminam|transmite|transmitem|atinge|atingem|afeta|afetam|"
-    r"cura|curam|mata|matam|morre|morrem|falece|falecem|sofre|sofrem|"
-    r"encontra|encontram|descobre|descobrem|mostra|mostram|grava|gravam|"
-    r"filma|filmam|flagra|flagram|"
-    r"contrai|contraem|atrai|atraem|distrai|distraem|subtrai|subtraem|sai|saem|cai|caem|"
-    r"faz|fazem|diz|dizem|traz|trazem|vai|vão|vem|vêm|vê|veem|ouve|ouvem|"
-    r"quer|querem|pode|podem|sabe|sabem|tem|têm|é|são|está|estão|dá|dão|põe|põem|"
-    r"altera|alteram|causa|causam|provoca|provocam|gera|geram|destr[oó]i|destroem|"
-    r"afirma|afirmam|declara|declaram|revela|revelam|confirma|confirmam|"
-    r"esconde|escondem|publica|publicam|pro[ií]be|pro[ií]bem|autoriza|autorizam|"
-    r"aprova|aprovam|cancela|cancelam|aumenta|aumentam|reduz|reduzem|"
-    r"cobra|cobram|compra|compram|vende|vendem"
-    r")\b",
-    re.IGNORECASE,
-)
-
-NON_VERB_SUFFIX_EXCLUSIONS = {
-    "museu", "troféu", "judeu", "breu", "plebeu", "céu", "meu", "seu", "teu",
-    "ouro", "touro", "louro", "besouro", "show", "fuzil", "barril", "gentil", "abril",
-    "trava", "brava", "escrava", "oitava", "dia", "guia", "bacia", "magia", "copia",
-    "padaria", "farmácia", "drogaria", "delegacia", "mídia", "notícia", "família",
-    "polícia", "estratégia", "maioria", "minoria", "energia", "pandemia", "indústria",
-    "maracujá", "guaraná", "pará", "alvará", "carajá", "tamanduá", "jacarandá",
+# Siglas de órgãos e entidades institucionais relevantes para Fact-Checking
+KNOWN_ORGS = {
+    "STF", "TSE", "STJ", "TCU", "ANVISA", "PF", "PRF", "IBGE", "MEC", "SUS",
+    "FIOCRUZ", "PETROBRAS", "RECEITA FEDERAL", "GOVERNO FEDERAL", "INSS", "ANATEL",
+    "ANS", "ANEEL", "ANTT", "CVM", "IBAMA"
 }
 
-CORE_ORGANIZATIONS = {
-    "stf", "tse", "stj", "tcu", "anvisa", "pf", "prf", "ibge", "mec", "sus", "fiocruz",
-    "petrobras", "receita federal", "governo federal", "governo", "congresso", "senado",
-    "câmara dos deputados", "ministério da saúde", "ministério da justiça", "ministério",
-    "banco central", "bacen", "inss", "anatel", "ans", "aneel", "antt", "cvm", "ibama",
+KNOWN_ROLES = {
+    "médico", "médicos", "doutor", "doutores", "cirurgião", "cirurgiões",
+    "cientista", "cientistas", "especialista", "especialistas", "pesquisador", "pesquisadores"
 }
-
-CORE_ROLES_OR_PERSONS = {
-    "médico", "médicos", "doutor", "doutores", "cirurgião", "cirurgiões", "cientista",
-    "cientistas", "especialista", "especialistas", "pesquisador", "pesquisadores",
-    "ministro", "ministros", "presidente", "governador", "prefeito", "senador", "deputado",
-    "juiz", "juízes", "delegado", "policial", "policiais", "alexandre de moraes", "moraes",
-    "bolsonaro", "lula", "tarcísio", "sérgio moro", "moro",
-}
-
-LOCATIONS = {
-    "brasil", "brasília", "são paulo", "rio de janeiro", "minas gerais", "bahia",
-    "paraná", "sul", "nordeste", "sudeste", "norte", "centro-oeste", "eua", "china",
-}
-
-
-def infer_source_types(text: str, entities: dict[str, list[str]]) -> list[VerificationSourceType]:
-    """Infere tipos de fontes esperadas a partir de entidades e vocabulário semântico."""
-    sources: list[VerificationSourceType] = []
-    combined = (text + " " + " ".join(e for cat in entities.values() for e in cat)).lower()
-
-    if any(k in combined for k in ("anvisa", "anatel", "bacen", "aneel", "ans", "antt", "cvm", "ibama")):
-        sources.append(VerificationSourceType.AGENCIA_REGULADORA)
-    if any(k in combined for k in ("ministério", "governo", "receita federal", "diário oficial", "prefeitura", "presidência")):
-        sources.append(VerificationSourceType.ORGAO_OFICIAL)
-    if any(k in combined for k in ("stf", "stj", "tse", "tcu", "cnj", "justiça", "tribunal", "moraes", "juiz", "vara", "moro", "sérgio moro")):
-        sources.append(VerificationSourceType.PODER_JUDICIARIO)
-    if any(k in combined for k in ("médico", "doutor", "fiocruz", "ibge", "ipea", "inpe", "usp", "universidade", "estudo", "pesquisa", "hospital", "cirurgia")):
-        sources.append(VerificationSourceType.INSTITUTO_PESQUISA)
-    if any(k in combined for k in ("vacina", "remédio", "remédios", "medicamento", "saúde", "infarto", "coração", "lote", "adulterado")):
-        if VerificationSourceType.AGENCIA_REGULADORA not in sources:
-            sources.append(VerificationSourceType.AGENCIA_REGULADORA)
-        if VerificationSourceType.ORGAO_OFICIAL not in sources:
-            sources.append(VerificationSourceType.ORGAO_OFICIAL)
-
-    if not sources:
-        sources = [VerificationSourceType.DADOS_PUBLICOS, VerificationSourceType.AGENCIA_CHECAGEM]
-    return sources
 
 
 def map_source_type(val: Any) -> VerificationSourceType | None:
-    """Mapeia strings flexíveis ou alucinações de LLM para valores estritos do enum."""
+    """Normaliza strings ou alucinações de LLM para o enum estrito VerificationSourceType."""
     if isinstance(val, VerificationSourceType):
         return val
     if not isinstance(val, str):
@@ -202,145 +84,116 @@ def map_source_type(val: Any) -> VerificationSourceType | None:
     return VerificationSourceType.DADOS_PUBLICOS
 
 
+def infer_source_types(text: str, entities: dict[str, list[str]]) -> list[VerificationSourceType]:
+    """Infere tipos de fontes oficiais recomendadas a partir do texto e entidades detectadas."""
+    sources: list[VerificationSourceType] = []
+    combined = (text + " " + " ".join(e for cat in entities.values() for e in cat)).lower()
+
+    if any(k in combined for k in ("anvisa", "anatel", "bacen", "aneel", "ans", "antt", "cvm", "ibama")):
+        sources.append(VerificationSourceType.AGENCIA_REGULADORA)
+    if any(k in combined for k in ("ministério", "governo", "receita federal", "diário oficial", "prefeitura", "presidência")):
+        sources.append(VerificationSourceType.ORGAO_OFICIAL)
+    if any(k in combined for k in ("stf", "stj", "tse", "tcu", "cnj", "justiça", "tribunal", "moraes", "juiz", "vara", "moro")):
+        sources.append(VerificationSourceType.PODER_JUDICIARIO)
+    if any(k in combined for k in ("médico", "doutor", "fiocruz", "ibge", "ipea", "inpe", "usp", "universidade", "estudo", "pesquisa", "hospital", "cirurgia")):
+        sources.append(VerificationSourceType.INSTITUTO_PESQUISA)
+    if any(k in combined for k in ("vacina", "remédio", "remédios", "medicamento", "saúde", "infarto", "coração", "lote", "adulterado")):
+        if VerificationSourceType.AGENCIA_REGULADORA not in sources:
+            sources.append(VerificationSourceType.AGENCIA_REGULADORA)
+        if VerificationSourceType.ORGAO_OFICIAL not in sources:
+            sources.append(VerificationSourceType.ORGAO_OFICIAL)
+
+    if not sources:
+        sources = [VerificationSourceType.DADOS_PUBLICOS, VerificationSourceType.AGENCIA_CHECAGEM]
+    return sources
+
+
 # ==============================================================================
-# 1. PRÉ-PROCESSAMENTO & GATEKEEPER VIA SPACY / MORFOLOGIA (CPU)
+# 1. PRÉ-PROCESSAMENTO & GATEKEEPER VIA SPACY (CPU)
 # ==============================================================================
 
 class SpacyPreprocessor:
-    """Higienização de ruídos residuais, extração de entidades e gatekeeping sintático."""
+    """Higienização de ruídos, extração de entidades e gatekeeping sintático com spaCy."""
 
     def __init__(self) -> None:
-        self.nlp = None
-        try:
-            import spacy
-            for model in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
-                try:
-                    self.nlp = spacy.load(model, exclude=["lemmatizer"])
-                    logger.info("spaCy carregado com sucesso para NER e triagem: %s", model)
-                    break
-                except Exception:
-                    continue
-        except ImportError:
-            logger.debug("spaCy não disponível no ambiente. Utilizando gatekeeper morfológico determinístico.")
+        for model in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
+            try:
+                self.nlp = spacy.load(model, exclude=["lemmatizer"])
+                logger.info("spaCy carregado com sucesso: %s", model)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError(
+                "Nenhum modelo do spaCy foi encontrado. "
+                "Execute: python -m spacy download pt_core_news_sm"
+            )
 
     def clean_text(self, text: str) -> str:
         """Remove emojis de alarme, pontuações de pânico e decanta alertas sensacionalistas."""
-        t = re.sub(r"[🚨⚠️💣🔥🛑📢👀⚡🇧🇷❌‼️⁉️]", " ", text)
+        t = RE_ALARM_SYMBOLS.sub(" ", text)
         t = re.sub(r"\?{2,}", "?", t)
         t = re.sub(r"!{2,}", ".", t)
         t = re.sub(r"\.{2,}", ".", t)
-        t = re.sub(r"\s+", " ", t).strip()
+        t = RE_WHITESPACE.sub(" ", t).strip()
 
-        # Decapita cabeçalhos de alarme isolados no início
-        t = re.sub(
-            r"^(?:(?:URGENTE|BOMBA|ALERTA|ATENÇÃO BRASIL)[!.:\s-]*)+",
-            "",
-            t,
-            flags=re.IGNORECASE,
-        ).strip()
+        # Remove alertas de topo repetidos (ex: BOMBA!! URGENTE: ...)
+        t = RE_ALARM_HEADERS.sub("", t).strip()
         t = re.sub(r"^[\s,;.:-]+", "", t).strip()
         return t
 
     def extract_entities(self, text: str) -> dict[str, list[str]]:
-        """Identifica entidades nomeadas categorizadas (PER, ORG, LOC)."""
+        """Extrai entidades nomeadas categorizadas (PER, ORG, LOC) via spaCy."""
         entities: dict[str, list[str]] = {"PER": [], "ORG": [], "LOC": []}
         if not text:
             return entities
 
-        # 1. Se spaCy estiver carregado, utiliza o modelo estatístico
-        if self.nlp is not None:
-            try:
-                doc = self.nlp(text)
-                for ent in doc.ents:
-                    lbl = ent.label_
-                    val = ent.text.strip()
-                    if lbl in entities and val not in entities[lbl]:
-                        entities[lbl].append(val)
-                return entities
-            except Exception:
-                pass
+        doc = self.nlp(text)
+        for ent in doc.ents:
+            lbl = ent.label_
+            text_clean = ent.text.strip()
+            # Calibração taxonômica de siglas institucionais e cargos
+            if text_clean.upper() in KNOWN_ORGS:
+                lbl = "ORG"
+            elif text_clean.lower() in KNOWN_ROLES:
+                lbl = "PER"
 
-        # 2. Heurística determinística complementar / fallback
-        words = text.split()
-        for idx, w in enumerate(words):
-            w_clean = re.sub(r"^[^\w]+|[^\w]+$", "", w)
-            w_lower = w_clean.lower()
-
-            if w_lower in CORE_ORGANIZATIONS or (w_clean.isupper() and len(w_clean) >= 2 and w_lower not in NON_VERB_SUFFIX_EXCLUSIONS):
-                if w_clean not in entities["ORG"]:
-                    entities["ORG"].append(w_clean)
-            elif w_lower in CORE_ROLES_OR_PERSONS:
-                if w_clean.capitalize() not in entities["PER"]:
-                    entities["PER"].append(w_clean.capitalize())
-            elif w_lower in LOCATIONS:
-                if w_clean.capitalize() not in entities["LOC"]:
-                    entities["LOC"].append(w_clean.capitalize())
-
-        # Expressões compostas conhecidas
-        t_lower = text.lower()
-        if "sérgio moro" in t_lower or "sergio moro" in t_lower:
-            if "Sérgio Moro" not in entities["PER"]:
-                entities["PER"].append("Sérgio Moro")
-        if "ministério da saúde" in t_lower and "Ministério da Saúde" not in entities["PER"]:
-            entities["PER"].append("Ministério da Saúde")
-        if "alexandre de moraes" in t_lower and "Alexandre de Moraes" not in entities["PER"]:
-            entities["PER"].append("Alexandre de Moraes")
-        if "receita federal" in t_lower and "Receita Federal" not in entities["ORG"]:
-            entities["ORG"].append("Receita Federal")
-        if "são paulo" in t_lower and "São Paulo" not in entities["LOC"]:
-            entities["LOC"].append("São Paulo")
-        if "brasília" in t_lower and "Brasília" not in entities["LOC"]:
-            entities["LOC"].append("Brasília")
+            if lbl in entities and text_clean not in entities[lbl]:
+                entities[lbl].append(text_clean)
 
         return entities
 
     def analyze(self, text: str) -> tuple[dict[str, list[str]], bool]:
         """
-        Processa o texto em único passe (CPU):
+        Processa o texto em único passe (CPU com spaCy):
         - Extrai entidades (PER, ORG, LOC).
-        - Atua como gatekeeper: retorna True se houver estrutura sintática mínima
-          para formular uma alegação factual falseável (verbo + substantivo/entidade).
+        - Atua como gatekeeper: retorna True se houver viabilidade sintática mínima
+          para formular uma alegação factual (verbo + substantivo/entidade).
+        - Descarta na raiz ruídos, saudações e opiniões declaradas.
         """
         entities = self.extract_entities(text)
         if not text or len(text.strip()) < 8:
             return entities, False
 
-        # Descarte antecipado de opiniões ou cumprimentos puros
-        if OPINION_PATTERNS.search(text) and ("acho" in text.lower() or "deus" in text.lower() or "vergonha" in text.lower()):
+        # Descarte antecipado de opiniões declaradas ou cumprimentos
+        if OPINION_PATTERNS.search(text) and any(w in text.lower() for w in ("acho", "deus", "vergonha", "opinião", "bom dia")):
             return entities, False
 
-        # 1. Se spaCy disponível, validação via POS tags
-        if self.nlp is not None:
-            doc = self.nlp(text)
-            has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc)
-            has_content_nominal = any(t.pos_ in ("NOUN", "PROPN", "NUM") for t in doc) or any(entities.values())
-            has_min_length = len(doc) >= 4
-            is_viable = has_verb and has_content_nominal and has_min_length
-            return entities, is_viable
+        doc = self.nlp(text)
+        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc)
+        has_content = any(t.pos_ in ("NOUN", "PROPN", "NUM") for t in doc) or any(entities.values())
+        has_min_length = len(doc) >= 4
 
-        # 2. Gatekeeper determinístico morfológico (caso spaCy não esteja instalado)
-        verb_candidates = (
-            list(PASSIVE_VOICE_PATTERN.finditer(text)) +
-            list(VERBAL_PERIPHRASIS_PATTERN.finditer(text)) +
-            list(PAST_INDICATIVE_SUFFIXES.finditer(text)) +
-            list(IMPERFECT_INDICATIVE_SUFFIXES.finditer(text)) +
-            list(FUTURE_INDICATIVE_SUFFIXES.finditer(text)) +
-            list(PRESENT_DECLARATIVE_VERBS.finditer(text)) +
-            list(PAST_IRREGULAR_VERBS.finditer(text))
-        )
-        has_verb = any(m.group(0).lower() not in NON_VERB_SUFFIX_EXCLUSIONS for m in verb_candidates)
-        tokens = text.split()
-        has_content = has_verb and (len(tokens) >= 4 or any(entities.values()))
-
-        return entities, bool(has_content)
+        is_viable = has_verb and has_content and has_min_length
+        return entities, is_viable
 
 
-# Alias para retrocompatibilidade com suítes de teste existentes
+# Alias para retrocompatibilidade com suítes de teste
 SpacyNERCleaner = SpacyPreprocessor
 
 
 # ==============================================================================
-# 2. MOTOR DE DECOMPOSIÇÃO BASEADO EM LLM COM CACHE E FALLBACK RESILIENTE
+# 2. MOTOR DE DECOMPOSIÇÃO EXCLUSIVAMENTE VIA LLM (COM CACHE LRU)
 # ==============================================================================
 
 SYSTEM_PROMPT = """Você é um motor analítico especializado em extração, normalização e decomposição de alegações factuais para sistemas automatizados de checagem de fatos (Fact-Checking Pipeline).
@@ -412,7 +265,7 @@ DECOMPOSITION_JSON_SCHEMA = {
 
 
 class LLMClaimDecomposer:
-    """Decomposição semântica e estruturação via LLM com cache LRU em memória e fallback resiliente."""
+    """Decomposição semântica e estruturação exclusivamente via LLM com cache LRU em memória."""
 
     def __init__(self, http_client: httpx.AsyncClient | None = None, cache_maxsize: int = 1024) -> None:
         self.settings = get_settings()
@@ -440,132 +293,19 @@ class LLMClaimDecomposer:
         if self._owned_client:
             await self.http_client.aclose()
 
-    def _extract_triple_syntactic(self, clause: str, entities: dict[str, list[str]]) -> KnowledgeTriple:
-        """Extrai tripla semântica sujeito-predicado-objeto via morfologia."""
-        clean_s = clause.strip(" ,;.:-")
-        subject = "Fato reportado"
-        for cat in ("PER", "ORG", "LOC"):
-            for ent in entities.get(cat, []):
-                if ent.lower() in clean_s.lower():
-                    subject = ent
-                    break
-            if subject != "Fato reportado":
-                break
-
-        if subject == "Fato reportado":
-            np_match = re.match(
-                r"^(?:O|A|Os|As|Um|Uma)?\s*([a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+(?:\s+[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+){0,3})\b",
-                clean_s,
-            )
-            if np_match:
-                subject = np_match.group(0).strip()
-
-        predicate = "afirmação sobre"
-        verb_candidates = (
-            list(PASSIVE_VOICE_PATTERN.finditer(clean_s)) +
-            list(VERBAL_PERIPHRASIS_PATTERN.finditer(clean_s)) +
-            list(PAST_INDICATIVE_SUFFIXES.finditer(clean_s)) +
-            list(IMPERFECT_INDICATIVE_SUFFIXES.finditer(clean_s)) +
-            list(FUTURE_INDICATIVE_SUFFIXES.finditer(clean_s)) +
-            list(PRESENT_DECLARATIVE_VERBS.finditer(clean_s)) +
-            list(PAST_IRREGULAR_VERBS.finditer(clean_s))
-        )
-        valid_verbs = [m for m in verb_candidates if m.group(0).lower() not in NON_VERB_SUFFIX_EXCLUSIONS]
-        if valid_verbs:
-            first_verb = sorted(valid_verbs, key=lambda m: m.start())[0]
-            v_start = first_verb.start()
-            v_end = first_verb.end()
-            predicate = clean_s[v_start:v_end].strip()
-            after_verb = clean_s[v_end:].strip()
-            obj = after_verb if len(after_verb) > 2 else "ocorrência descrita"
-        else:
-            obj = clean_s
-
-        return KnowledgeTriple(subject=subject, predicate=predicate, object=obj)
-
-    def decompose_syntactic(
-        self,
-        cleaned_text: str,
-        entities: dict[str, list[str]],
-    ) -> tuple[list[AtomicAssertion], list[str]]:
-        """Decomposição sintática e morfológica determinística (fallback autossuficiente)."""
-        raw_sentences = [s.strip() for s in re.split(r"[.!?\n]+", cleaned_text) if s.strip()]
-        clause_splitter = re.compile(
-            r"\b(?:porque|por que|já que|visto que|pois|mas|porém|contudo|todavia|enquanto|e que)\b",
-            re.IGNORECASE,
-        )
-
-        atomic_candidates: list[str] = []
-        discarded: list[str] = []
-
-        for sent in raw_sentences:
-            if NOISE_PATTERNS.search(sent) and (len(sent.split()) <= 6 or "mídia" in sent.lower() or "tv" in sent.lower() or "apaguem" in sent.lower() or "repassem" in sent.lower()):
-                discarded.append(sent)
-                continue
-
-            sub_clauses = [c.strip() for c in clause_splitter.split(sent) if c.strip()]
-            for clause in sub_clauses:
-                cleaned_clause = re.sub(
-                    r"^(?:veja|olhe|compartilhe|repassem|atenção brasil|atenção|urgente|bomba)[!:\s,-]*",
-                    "",
-                    clause,
-                    flags=re.IGNORECASE,
-                ).strip(" ,;.:-")
-
-                if not cleaned_clause:
-                    continue
-
-                if NOISE_PATTERNS.search(cleaned_clause) and (len(cleaned_clause.split()) <= 6 or "apaguem" in cleaned_clause.lower() or "mídia" in cleaned_clause.lower()):
-                    discarded.append(cleaned_clause)
-                    continue
-
-                verb_candidates = (
-                    list(PASSIVE_VOICE_PATTERN.finditer(cleaned_clause)) +
-                    list(VERBAL_PERIPHRASIS_PATTERN.finditer(cleaned_clause)) +
-                    list(PAST_INDICATIVE_SUFFIXES.finditer(cleaned_clause)) +
-                    list(IMPERFECT_INDICATIVE_SUFFIXES.finditer(cleaned_clause)) +
-                    list(FUTURE_INDICATIVE_SUFFIXES.finditer(cleaned_clause)) +
-                    list(PRESENT_DECLARATIVE_VERBS.finditer(cleaned_clause)) +
-                    list(PAST_IRREGULAR_VERBS.finditer(cleaned_clause))
-                )
-                has_verb = any(m.group(0).lower() not in NON_VERB_SUFFIX_EXCLUSIONS for m in verb_candidates)
-
-                if has_verb and len(cleaned_clause.split()) >= 3:
-                    atomic_candidates.append(cleaned_clause)
-                else:
-                    discarded.append(cleaned_clause)
-
-        if not atomic_candidates and cleaned_text and not OPINION_PATTERNS.search(cleaned_text):
-            atomic_candidates = [cleaned_text]
-
-        sources = infer_source_types(cleaned_text, entities)
-        assertions: list[AtomicAssertion] = []
-        for idx, candidate in enumerate(atomic_candidates, 1):
-            triple = self._extract_triple_syntactic(candidate, entities)
-            assertions.append(
-                AtomicAssertion(
-                    id=idx,
-                    statement=candidate,
-                    triple=triple,
-                    suggested_source_types=sources,
-                    is_check_worthy=True,
-                )
-            )
-        return assertions, discarded
-
     async def decompose(
         self,
         cleaned_text: str,
         entities: dict[str, list[str]],
-    ) -> tuple[list[AtomicAssertion], str, list[str]]:
+    ) -> list[AtomicAssertion]:
         """
-        Decompõe texto com verificação de cache LRU, Structured Outputs na LLM
-        e fallback transparente para motor determinístico em caso de indisponibilidade.
+        Decompõe texto em proposições atômicas exclusivamente via LLM.
+        Não utiliza fallback determinístico.
         """
         cache_key = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
         cached = self._get_from_cache(cache_key)
         if cached is not None:
-            return cached, f"cache:{self.settings.get_llm_model()}", []
+            return cached
 
         user_prompt = (
             f"Texto: \"{cleaned_text}\"\n"
@@ -591,57 +331,43 @@ class LLMClaimDecomposer:
             "temperature": 0.0,
         }
 
-        # Se for OpenAI mas não houver chave configurada, utiliza fallback direto
-        provider = self.settings.LLM_PROVIDER.lower()
-        if provider == "openai" and not self.settings.OPENAI_API_KEY:
-            fallback, discarded = self.decompose_syntactic(cleaned_text, entities)
-            return fallback, "syntactic_fallback", discarded
+        resp = await self.http_client.post(
+            self.settings.get_llm_endpoint(),
+            headers=self.settings.get_llm_headers(),
+            json=payload,
+        )
 
-        try:
+        # Se json_schema não for aceito pelo provedor/modelo, tenta modo json_object
+        if resp.status_code == 400:
+            payload["response_format"] = {"type": "json_object"}
             resp = await self.http_client.post(
                 self.settings.get_llm_endpoint(),
                 headers=self.settings.get_llm_headers(),
                 json=payload,
             )
 
-            # Se json_schema não for aceito pelo modelo local, tenta modo json_object
-            if resp.status_code == 400:
-                payload["response_format"] = {"type": "json_object"}
-                resp = await self.http_client.post(
-                    self.settings.get_llm_endpoint(),
-                    headers=self.settings.get_llm_headers(),
-                    json=payload,
-                )
+        resp.raise_for_status()
 
-            if resp.status_code == 200:
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                parsed = json.loads(content)
-                raw_assertions = parsed.get("assertions", [])
-                inferred_sources = infer_source_types(cleaned_text, entities)
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        raw_assertions = parsed.get("assertions", [])
+        inferred_sources = infer_source_types(cleaned_text, entities)
 
-                assertions: list[AtomicAssertion] = []
-                for item in raw_assertions:
-                    cleaned_sources: list[str] = []
-                    for s in item.get("suggested_source_types", []):
-                        mapped = map_source_type(s)
-                        if mapped and mapped.value not in cleaned_sources:
-                            cleaned_sources.append(mapped.value)
-                    if not cleaned_sources:
-                        cleaned_sources = [s.value for s in inferred_sources]
-                    item["suggested_source_types"] = cleaned_sources
-                    assertions.append(AtomicAssertion.model_validate(item))
+        assertions: list[AtomicAssertion] = []
+        for item in raw_assertions:
+            cleaned_sources: list[str] = []
+            for s in item.get("suggested_source_types", []):
+                mapped = map_source_type(s)
+                if mapped and mapped.value not in cleaned_sources:
+                    cleaned_sources.append(mapped.value)
+            if not cleaned_sources:
+                cleaned_sources = [s.value for s in inferred_sources]
+            item["suggested_source_types"] = cleaned_sources
+            assertions.append(AtomicAssertion.model_validate(item))
 
-                if assertions:
-                    self._save_to_cache(cache_key, assertions)
-                    return assertions, f"llm:{self.settings.get_llm_model()}", []
-
-        except Exception as e:
-            logger.debug("LLM offline ou inacessível (%s). Ativando fallback determinístico.", e)
-
-        # Fallback determinístico offline (garante resiliência e testes verdes)
-        fallback_assertions, discarded = self.decompose_syntactic(cleaned_text, entities)
-        return fallback_assertions, "syntactic_fallback", discarded
+        self._save_to_cache(cache_key, assertions)
+        return assertions
 
 
 # ==============================================================================
@@ -652,8 +378,8 @@ class LLMClaimDecomposer:
 class ClaimExtractorAnalyzer(BaseAnalyzer):
     """
     Analisador de Extração Factual em 2 Etapas:
-    1. Higienização & Gatekeeper (spaCy/Morfologia em CPU - descarta não-fatos a custo zero).
-    2. Decomposição Semântica Atômica (LLM com Structured Outputs, Cache LRU e Fallback Resiliente).
+    1. Higienização & Gatekeeper (spaCy em CPU - descarta não-fatos a custo zero).
+    2. Decomposição Semântica Atômica (LLM com Structured Outputs e Cache LRU).
     """
 
     def __init__(self) -> None:
@@ -671,11 +397,11 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
         await self.http_client.aclose()
 
     async def extract_contract(self, text: str) -> ClaimExtractionContract:
-        """Executa o pipeline em camadas e produz o contrato estrito Pydantic."""
+        """Executa o pipeline (spaCy -> LLM) e produz o contrato estrito Pydantic."""
         cleaned = self.preprocessor.clean_text(text)
         entities, is_viable = self.preprocessor.analyze(cleaned)
 
-        # Camada 1 (Gatekeeper): Se não houver estrutura mínima factual, descarta antecipadamente
+        # Camada 1 (Gatekeeper spaCy): Se não houver estrutura mínima factual, descarta antecipadamente
         if not is_viable:
             return ClaimExtractionContract(
                 original_text=text,
@@ -686,16 +412,16 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
                 engine_used="spacy_gatekeeper_short_circuit",
             )
 
-        # Camada 2: Decomposição Atômica via LLM / Fallback
-        assertions, engine_used, discarded = await self.decomposer.decompose(cleaned, entities)
+        # Camada 2: Decomposição Atômica exclusivamente via LLM
+        assertions = await self.decomposer.decompose(cleaned, entities)
 
         return ClaimExtractionContract(
             original_text=text,
             cleaned_text=cleaned,
             entities=entities,
             assertions=assertions,
-            discarded_fragments=discarded,
-            engine_used=engine_used,
+            discarded_fragments=[],
+            engine_used=f"llm:{self.settings.get_llm_model()}",
         )
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
@@ -745,7 +471,7 @@ def format_cli_result(result: AnalyzerResult) -> None:
     elif "gatekeeper" in engine:
         print(f"⚙️  MOTOR EXECUTOR: Gatekeeper Sintático ({engine})")
     else:
-        print(f"⚙️  MOTOR EXECUTOR: Motor Algorítmico / Sintático (Fallback Offline)")
+        print(f"⚙️  MOTOR EXECUTOR: {engine}")
 
     if result.claim:
         print(f"🎯 ALEGAÇÃO PRINCIPAL ISOLADA (CLAIM):\n   👉 \"{result.claim}\"\n")
@@ -799,7 +525,7 @@ if __name__ == "__main__":
             # 1. Se passou o texto como argumento direto via linha de comando:
             if len(sys.argv) > 1:
                 text = " ".join(sys.argv[1:])
-                print("\n🔍 Processando texto nas 3 camadas (Contrato, NER & Decomposição)...")
+                print("\n🔍 Processando texto nas 2 camadas (spaCy Gatekeeper + LLM Structured Outputs)...")
                 res = await extractor.analyze(text, [])
                 format_cli_result(res)
                 return
