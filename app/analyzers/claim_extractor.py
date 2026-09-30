@@ -178,6 +178,30 @@ def infer_source_types(text: str, entities: dict[str, list[str]]) -> list[Verifi
     return sources
 
 
+def map_source_type(val: Any) -> VerificationSourceType | None:
+    """Mapeia strings flexíveis ou alucinações de LLM para valores estritos do enum."""
+    if isinstance(val, VerificationSourceType):
+        return val
+    if not isinstance(val, str):
+        return None
+    normalized = val.strip().upper().replace(" ", "_").replace("-", "_")
+    for st in VerificationSourceType:
+        if st.value == normalized:
+            return st
+    val_lower = val.lower()
+    if any(k in val_lower for k in ("médic", "doutor", "saúde", "pesquisa", "hospital", "estudo", "cirurgia")):
+        return VerificationSourceType.INSTITUTO_PESQUISA
+    if any(k in val_lower for k in ("tribunal", "juiz", "vara", "justiça", "judiciário", "stf", "moro")):
+        return VerificationSourceType.PODER_JUDICIARIO
+    if any(k in val_lower for k in ("anvisa", "regulador", "agência reguladora", "anatel")):
+        return VerificationSourceType.AGENCIA_REGULADORA
+    if any(k in val_lower for k in ("governo", "oficial", "ministério", "diário", "receita")):
+        return VerificationSourceType.ORGAO_OFICIAL
+    if any(k in val_lower for k in ("checagem", "fact-check", "lupa", "fatos")):
+        return VerificationSourceType.AGENCIA_CHECAGEM
+    return VerificationSourceType.DADOS_PUBLICOS
+
+
 # ==============================================================================
 # 1. PRÉ-PROCESSAMENTO & GATEKEEPER VIA SPACY / MORFOLOGIA (CPU)
 # ==============================================================================
@@ -363,7 +387,17 @@ DECOMPOSITION_JSON_SCHEMA = {
                     },
                     "suggested_source_types": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "ORGAO_OFICIAL",
+                                "AGENCIA_REGULADORA",
+                                "PODER_JUDICIARIO",
+                                "INSTITUTO_PESQUISA",
+                                "AGENCIA_CHECAGEM",
+                                "DADOS_PUBLICOS",
+                            ],
+                        },
                     },
                     "is_check_worthy": {"type": "boolean"},
                 },
@@ -588,8 +622,14 @@ class LLMClaimDecomposer:
 
                 assertions: list[AtomicAssertion] = []
                 for item in raw_assertions:
-                    if not item.get("suggested_source_types"):
-                        item["suggested_source_types"] = [s.value for s in inferred_sources]
+                    cleaned_sources: list[str] = []
+                    for s in item.get("suggested_source_types", []):
+                        mapped = map_source_type(s)
+                        if mapped and mapped.value not in cleaned_sources:
+                            cleaned_sources.append(mapped.value)
+                    if not cleaned_sources:
+                        cleaned_sources = [s.value for s in inferred_sources]
+                    item["suggested_source_types"] = cleaned_sources
                     assertions.append(AtomicAssertion.model_validate(item))
 
                 if assertions:
