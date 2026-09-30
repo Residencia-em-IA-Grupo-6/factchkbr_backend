@@ -59,8 +59,12 @@ TRUSTED_MEDIA_DOMAINS = {
 
 # Palavras-chave indicativas de desmentido em títulos de leitura horizontal
 DEBUNK_TITLE_PATTERNS = re.compile(
-    r"\b(?:é falso|é mentira|é fake|é boato|não é verdade|desmente|nega|boato|fake news|"
-    r"falso|falsa|engana|distorce|não causou|não mata|não tem relação|golpe|falso que)\b",
+    r"\b(?:"
+    r"é falso|é mentira|é fake|é boato|não é verdade|desmente|desmentiu|nega|negou|"
+    r"boato|fake news|falso|falsa|engana|enganosa|distorce|distorcida|"
+    r"não causou|não causa|não causam|não mata|não matam|"
+    r"não t[eê]m? relação|não há relação|não provocam?|golpe|falso que"
+    r")\b",
     re.IGNORECASE,
 )
 
