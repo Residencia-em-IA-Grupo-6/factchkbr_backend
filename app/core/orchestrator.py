@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import sys
+import time
 from pathlib import Path
+from typing import Any, Callable
 
 # Permite execução direta via `python app/core/orchestrator.py`
 _project_root = str(Path(__file__).resolve().parent.parent.parent)
@@ -15,6 +18,8 @@ from app.schemas.analysis import (
     AnalyzerResult,
     Verdict,
 )
+
+logger = logging.getLogger("factchkbr.core.orchestrator")
 
 
 class FactCheckOrchestrator:
@@ -43,9 +48,14 @@ class FactCheckOrchestrator:
                 analyzers.append(analyzer_cls())
         return analyzers
 
-    async def analyze(self, text: str, urls: list[str]) -> AnalyzeResponse:
+    async def analyze(
+        self,
+        text: str,
+        urls: list[str],
+        on_step: Callable[[str, AnalyzerResult, float], Any] | None = None,
+    ) -> AnalyzeResponse:
         """
-        Executa o pipeline linear contextual:
+        Executa o pipeline linear contextual com rastreabilidade de etapas:
         1. Heurística (texto bruto, captura estilo e sensacionalismo)
         2. Extrator de Alegações (spaCy + LLM, isola fatos atômicos e faz gatekeeping)
         3. Fact-Check API & Leitura Horizontal (pesquisa evidências com a claim limpa)
@@ -68,15 +78,30 @@ class FactCheckOrchestrator:
         # 1. Heuristic Analyzer (Texto Bruto)
         heuristic_features: dict[str, Any] = {}
         if "heuristic" in active_map:
+            t0 = time.perf_counter()
             h_res = await active_map["heuristic"].analyze(text, urls)
+            dur = time.perf_counter() - t0
             results.append(h_res)
             heuristic_features = h_res.raw_details or {}
+            logger.info("Etapa 'heuristic' concluída em %.3fs", dur)
+            if on_step:
+                cb = on_step("heuristic", h_res, dur)
+                if asyncio.iscoroutine(cb):
+                    await cb
 
         # 2. Claim Extractor (spaCy Gatekeeper + LLM Decomposer)
         target_claim = text
         if "claim_extractor" in active_map:
+            t0 = time.perf_counter()
             c_res = await active_map["claim_extractor"].analyze(text, urls)
+            dur = time.perf_counter() - t0
             results.append(c_res)
+            logger.info("Etapa 'claim_extractor' concluída em %.3fs. Claim: '%s'", dur, c_res.claim)
+            if on_step:
+                cb = on_step("claim_extractor", c_res, dur)
+                if asyncio.iscoroutine(cb):
+                    await cb
+
             if c_res.claim:
                 target_claim = c_res.claim
             else:
@@ -95,12 +120,20 @@ class FactCheckOrchestrator:
         # 3. Fact-Check API & Leitura Horizontal (com a claim isolada)
         evidences: list[dict[str, Any]] = []
         if "fact_check_api" in active_map:
+            t0 = time.perf_counter()
             fc_res = await active_map["fact_check_api"].analyze(target_claim, urls)
+            dur = time.perf_counter() - t0
             results.append(fc_res)
             evidences = (fc_res.raw_details or {}).get("evidences", [])
+            logger.info("Etapa 'fact_check_api' concluída em %.3fs. %d evidência(s)", dur, len(evidences))
+            if on_step:
+                cb = on_step("fact_check_api", fc_res, dur)
+                if asyncio.iscoroutine(cb):
+                    await cb
 
         # 4. LLM Judge (com contexto de evidências e métricas)
         if "llm_judge" in active_map:
+            t0 = time.perf_counter()
             judge = active_map["llm_judge"]
             if hasattr(judge, "analyze_with_context"):
                 j_res = await judge.analyze_with_context(
@@ -108,7 +141,13 @@ class FactCheckOrchestrator:
                 )
             else:
                 j_res = await judge.analyze(target_claim, urls)
+            dur = time.perf_counter() - t0
             results.append(j_res)
+            logger.info("Etapa 'llm_judge' concluída em %.3fs. Veredito: %s", dur, j_res.verdict)
+            if on_step:
+                cb = on_step("llm_judge", j_res, dur)
+                if asyncio.iscoroutine(cb):
+                    await cb
 
         return self._consolidate(text, results, target_claim=target_claim)
 
