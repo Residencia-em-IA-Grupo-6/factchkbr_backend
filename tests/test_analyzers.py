@@ -1,3 +1,4 @@
+import json
 import pytest
 from app.analyzers.heuristic import HeuristicAnalyzer
 from app.core.base import BaseAnalyzer
@@ -500,6 +501,108 @@ def test_orchestrator_inconclusive_safeguard_without_debunk():
     assert response.verdict == Verdict.INCONCLUSIVO
     assert any("impedem a classificação como fake" in r.lower() or "ausência de referências" in r.lower() for r in response.reasons)
     assert any(k in response.summary.lower() for k in ("recente", "insuficiente", "ausência", "dados", "imprecis"))
+
+
+def test_fact_check_api_desmentido_rating():
+    """Garante que a classificação 'Desmentido' de agências IFCN resulte em FAKE com alta confiança."""
+    from app.analyzers.fact_check_api import EvidenceItem, FactCheckApiAnalyzer
+    analyzer = FactCheckApiAnalyzer()
+
+    evidences = [
+        EvidenceItem(
+            title="É falso que voto nas eleições não pode ser utilizado como prova de vida do INSS",
+            source_name="Aos Fatos",
+            url="https://aosfatos.org/noticias/...",
+            snippet="Checagem oficial",
+            rating="Desmentido",
+            is_fact_check=True,
+        )
+    ]
+
+    verdict, confidence, reasons = analyzer.evaluate_verdict(evidences, claim="voto nas eleições não pode ser utilizado como prova de vida")
+    assert verdict == Verdict.FAKE
+    assert confidence >= 0.90
+    assert any("desmentido por checador oficial" in r.lower() for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_polarity_inversion_safeguard():
+    """Garante que inversões de polaridade do LLM (diz 'desmentida' mas marca VERDADEIRO) sejam corrigidas."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.analyzers.llm_judge import LlmJudgeAnalyzer
+
+    judge = LlmJudgeAnalyzer()
+
+    # Simula resposta do LLM com inversão de polaridade (VERDADEIRO em veredito, mas resumo aponta desmentido)
+    mock_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({
+                        "verdict": "VERDADEIRO",
+                        "confidence": 0.95,
+                        "summary": "A alegação de que o voto não pode ser utilizado foi desmentida por várias fontes confiáveis e pelo TSE.",
+                        "reasons": [
+                            "O Aos Fatos explicitamente desmentiu a afirmação",
+                            "TSE confirma que comparecimento vale como prova de vida"
+                        ],
+                        "sources": ["Aos Fatos", "TSE"]
+                    })
+                }
+            }
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = mock_payload
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        res = await judge.analyze_with_context(
+            text="voto nas eleições não pode ser utilizado como prova de vida do INSS",
+            urls=[],
+            evidences=[{"source_name": "Aos Fatos", "title": "É falso que voto não pode ser utilizado", "rating": "Desmentido"}]
+        )
+
+        assert res.verdict == Verdict.FAKE
+        assert res.raw_details.get("polarity_corrected") is True
+
+
+def test_orchestrator_debunk_precedence_over_hallucinated_verdadeiro():
+    """Garante que checagens oficiais com desmentido prevaleçam sobre alucinação de VERDADEIRO."""
+    orchestrator = FactCheckOrchestrator()
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.FAKE,
+        confidence=0.85,
+        claim="voto nas eleições não pode ser utilizado como prova de vida",
+        summary="A alegação foi desmentida por agências de checagem.",
+        reasons=["Desmentido por checador oficial"],
+        sources=["Aos Fatos"],
+        raw_details={
+            "evidences": [
+                {"source_name": "Aos Fatos", "title": "É falso que voto...", "rating": "Desmentido"}
+            ]
+        },
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.VERDADEIRO,
+        confidence=0.95,
+        claim="voto nas eleições não pode ser utilizado como prova de vida",
+        summary="Alegação afirmando que o voto não pode ser utilizado foi desmentida.",
+        reasons=["Aos Fatos desmentiu a afirmação"],
+        sources=["Aos Fatos"],
+        raw_details={"model": "phi3.5"},
+    )
+
+    response = orchestrator._consolidate("voto nas eleições não pode ser utilizado como prova de vida", [fc_result, judge_result])
+    assert response.verdict == Verdict.FAKE
+    assert any("prevalência de checagem oficial" in r.lower() for r in response.reasons)
+
 
 
 

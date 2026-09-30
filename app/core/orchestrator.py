@@ -203,13 +203,28 @@ class FactCheckOrchestrator:
                 else:
                     dominant_verdict = best_result.verdict
                     final_confidence = best_result.confidence
+
+                # Salvaguarda contra falso-verdadeiro: checagens oficiais de desmentido prevalecem sobre alucinações de VERDADEIRO
+                if has_debunk and fc_res and fc_res.verdict == Verdict.FAKE and dominant_verdict == Verdict.VERDADEIRO:
+                    logger.warning("Conflito detectado: fact_check_api possui desmentido comprovado mas decisor apontou VERDADEIRO. Prevalecendo FAKE.")
+                    dominant_verdict = Verdict.FAKE
+                    final_confidence = max(fc_res.confidence, 0.85)
+                    all_reasons.append(
+                        "Prevalência de checagem oficial: fontes jornalísticas/IFCN de desmentido têm precedência probatória sobre confirmação divergente."
+                    )
             else:
                 dominant_verdict = Verdict.INCONCLUSIVO
                 final_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
 
-            # Prioriza o resumo explicativo do LLM Judge se disponível, senão do fact_check_api
+            # Prioriza o resumo explicativo do LLM Judge se coerente com o veredito dominante, senão do fact_check_api
             if judge_res and judge_res.summary and not judge_res.summary.startswith("Avaliador LLM offline"):
-                summary = judge_res.summary
+                j_summary_lower = judge_res.summary.lower()
+                if dominant_verdict == Verdict.FAKE and any(c in j_summary_lower for c in ("é verdadeira", "alegação é verdadeira", "fato verdadeiro")):
+                    summary = fc_res.summary if (fc_res and fc_res.summary) else judge_res.summary
+                elif dominant_verdict == Verdict.VERDADEIRO and any(d in j_summary_lower for d in ("é falsa", "foi desmentida", "foi refutada")):
+                    summary = fc_res.summary if (fc_res and fc_res.summary) else judge_res.summary
+                else:
+                    summary = judge_res.summary
             elif fc_res and fc_res.summary:
                 summary = fc_res.summary
             else:

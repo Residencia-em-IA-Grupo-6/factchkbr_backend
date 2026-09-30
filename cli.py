@@ -128,6 +128,8 @@ def print_step_trace(step_name: str, result: AnalyzerResult, duration: float, ra
 
         print(f"\n[{now_str}] ── [4/4] ⚖️ JULGAMENTO CONTEXTUAL (LLM JUDGE) ({duration:.3f}s | {model} via {provider}) " + "─" * 12)
         print(f"      • Decisão do Juiz:       {v_str} (Confiança: {result.confidence * 100:.1f}%)")
+        if raw.get("polarity_corrected"):
+            print("      • Salvaguarda Semântica: 🔄 Polaridade corrigida para alinhamento com a fundamentação analítica")
         print(f"      • Síntese Analítica:     {result.summary}")
         if result.reasons:
             print(f"      • Fundamentos:")

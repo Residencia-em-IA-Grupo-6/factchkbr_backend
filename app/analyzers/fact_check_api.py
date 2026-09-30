@@ -257,7 +257,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         fact_checks = [e for e in evidences if e.is_fact_check and e.rating]
         if fact_checks:
             ratings_text = " ".join(f.rating.lower() for f in fact_checks if f.rating)
-            if any(k in ratings_text for k in ("falso", "fake", "mentira", "adulterado", "falsa", "incorreto")):
+            if any(k in ratings_text for k in ("falso", "fake", "mentira", "adulterado", "falsa", "incorreto", "desmentido")):
                 reasons = [
                     f"Desmentido por checador oficial ({f.source_name}): classificação '{f.rating}' para a alegação."
                     for f in fact_checks[:2]

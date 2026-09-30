@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+from typing import Any
 import httpx
 
 from app.config import get_settings
@@ -55,6 +57,11 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             "   - Se a alegação for comprovada como verdadeira pelas fontes, o veredito é 'VERDADEIRO'.\n"
             "   - Se a alegação trouxer exagero, distorção ou meia-verdade, o veredito é 'SUSPEITO'.\n"
             "   - Se NÃO houver referências suficientes para confirmar nem para refutar a afirmação (ex: fatos muito recentes em andamento, escassez de fontes ou matérias genéricas sem os dados específicos), o veredito DEVE ser 'INCONCLUSIVO'. Aponte explicitamente no resumo a imprecisão por falta de dados ou por se tratar de fato recente.\n\n"
+            "3. CUIDADO CRÍTICO COM ALEGAÇÕES NEGATIVAS E DUPLA NEGAÇÃO (INVERSÃO DE POLARIDADE):\n"
+            "   - Preste atenção extrema quando a alegação contiver negação (ex: 'não', 'nunca', 'jamais', 'não pode', 'não é').\n"
+            "   - Se a alegação afirma que algo 'NÃO PODE SER FEITO' ou 'NÃO OCORRE', e as fontes/desmentidos mostram que PODE SER FEITO ou dizem 'É falso que não pode', a alegação recebida é FALSA (verdict: 'FAKE').\n"
+            "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Se o fato alegado é inverídico, o veredito é 'FAKE'.\n"
+            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a alegação 'foi desmentida', 'foi refutada', 'é falsa' ou 'incorreta', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
             "FORMATO DE RESPOSTA:\n"
             "Retorne RIGOROSAMENTE apenas um JSON no formato:\n"
             "{\n"
@@ -67,6 +74,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
         )
 
         user_content = f"Alegação a ser verificada: \"{text}\"\n\n"
+        has_debunk = False
         if evidences:
             user_content += "Evidências e matérias encontradas por checadores e veículos confiáveis:\n"
             for ev in evidences[:5]:
@@ -75,6 +83,10 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                 rating = ev.get("rating")
                 rating_str = f" [Classificação: {rating}]" if rating else ""
                 user_content += f"- {src}: \"{title}\"{rating_str}\n"
+                if rating in ("Desmentido", "Falso", "Fake", "Mentira") or any(
+                    k in title.lower() for k in ("é falso", "é mentira", "desmente", "desmentiu", "boato")
+                ):
+                    has_debunk = True
             user_content += "\n"
         else:
             user_content += "Atenção: Nenhuma evidência, notícia ou checagem foi encontrada nas buscas externas.\n\n"
@@ -82,6 +94,12 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
             score = heuristic_features["composite_sensationalism_score"]
             user_content += f"Nota de alerta: O texto original possui sinais expressivos de sensacionalismo/apelo (índice: {score:.2f}).\n\n"
+
+        has_negation = bool(re.search(r"\b(?:não|nunca|jamais|tampouco|nenhum|nenhuma)\b", text, re.IGNORECASE))
+        if has_debunk:
+            user_content += "Atenção de verificação: As evidências acima contêm desmentido explícito. Se as fontes desmentem a alegação, o veredito DEVE ser FAKE.\n\n"
+        if has_negation:
+            user_content += "Atenção à polaridade: A alegação recebida é uma afirmação negativa. Se as fontes mostram que a afirmação negativa é inverídica (ou seja, a ação é permitida/ocorre), o veredito deve ser FAKE.\n\n"
 
         user_content += (
             "Avalie as evidências e emita o veredito final com justificativa fundamentada. "
@@ -117,15 +135,60 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                     confidence = float(parsed.get("confidence", 0.60))
                     confidence = max(0.0, min(1.0, confidence))
 
+                    summary = parsed.get("summary", "Avaliação realizada via modelo de linguagem.")
+                    reasons = parsed.get("reasons", ["Avaliação contextual por LLM"])
+
+                    # Validação de coerência interna semântica (salvaguarda contra inversão de polaridade em LLMs):
+                    explanation_corpus = f"{summary} {' '.join(reasons)}".lower()
+                    debunk_cues = (
+                        "foi desmentid", "foi refutad", "desmentiu a afirmação",
+                        "desmentiu a alegação", "desmentida por", "desmentido por",
+                        "afirmação é falsa", "alegação é falsa", "afirmação falsa",
+                        "alegação falsa", "declaração é falsa", "é falso que",
+                        "desmentido oficial", "trata-se de desinformação",
+                        "trata-se de boato", "não procede", "afirmação incorreta"
+                    )
+                    confirm_cues = (
+                        "comprovadamente verdadeiro", "fato comprovado",
+                        "afirmação é verdadeira", "alegação é verdadeira",
+                        "totalmente verdadeiro", "confirmada categoricamente",
+                        "comprova a alegação", "confirma a alegação"
+                    )
+
+                    polarity_corrected = False
+                    if verdict == Verdict.VERDADEIRO and any(cue in explanation_corpus for cue in debunk_cues):
+                        logger.warning(
+                            "Inversão de polaridade detectada no LLM Judge: explicação indica desmentido, "
+                            "mas veredito emitido foi VERDADEIRO. Corrigindo veredito para FAKE."
+                        )
+                        verdict = Verdict.FAKE
+                        polarity_corrected = True
+
+                    elif (
+                        verdict == Verdict.FAKE
+                        and any(cue in explanation_corpus for cue in confirm_cues)
+                        and not any(cue in explanation_corpus for cue in debunk_cues)
+                    ):
+                        logger.warning(
+                            "Inversão de polaridade detectada no LLM Judge: explicação indica confirmação, "
+                            "mas veredito emitido foi FAKE. Corrigindo veredito para VERDADEIRO."
+                        )
+                        verdict = Verdict.VERDADEIRO
+                        polarity_corrected = True
+
                     return AnalyzerResult(
                         analyzer_name="llm_judge",
                         verdict=verdict,
                         confidence=confidence,
                         claim=text[:120],
-                        summary=parsed.get("summary", "Avaliação realizada via modelo de linguagem."),
-                        reasons=parsed.get("reasons", ["Avaliação contextual por LLM"]),
+                        summary=summary,
+                        reasons=reasons,
                         sources=parsed.get("sources", [f"LLM Judge ({model})"]),
-                        raw_details={"model": model, "provider": provider},
+                        raw_details={
+                            "model": model,
+                            "provider": provider,
+                            "polarity_corrected": polarity_corrected,
+                        },
                     )
         except Exception as e:
             logger.debug("LLM Judge (%s: %s) indisponível (%s). Usando retorno padrão.", provider, model, e)
