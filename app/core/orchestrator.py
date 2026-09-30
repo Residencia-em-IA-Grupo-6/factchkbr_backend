@@ -102,45 +102,65 @@ class FactCheckOrchestrator:
                 j_res = await judge.analyze(target_claim, urls)
             results.append(j_res)
 
-        return self._consolidate(text, results)
+        return self._consolidate(text, results, target_claim=target_claim)
 
-    def _consolidate(self, text: str, results: list[AnalyzerResult]) -> AnalyzeResponse:
+    def _consolidate(
+        self,
+        text: str,
+        results: list[AnalyzerResult],
+        target_claim: str | None = None,
+    ) -> AnalyzeResponse:
         """
         Consolida os resultados individuais através de ensemble ponderado / consenso.
         Filtra apenas analisadores que emitiram veredito concreto.
         """
         all_reasons: list[str] = []
         all_sources: list[str] = []
-        primary_claim: str | None = None
+        primary_claim: str | None = target_claim
 
         # Coleta todas as razões, fontes e alegação isolada
         for r in results:
             all_reasons.extend(r.reasons)
             all_sources.extend(r.sources)
-            if r.claim and not primary_claim:
+            if not primary_claim and r.claim:
                 primary_claim = r.claim
 
         # Filtra apenas os analisadores que emitem veredito
         verdict_bearing_results = [r for r in results if r.verdict is not None]
 
         if verdict_bearing_results:
-            # Seleciona o veredito dos modelos decisores
-            first = verdict_bearing_results[0]
-            dominant_verdict = first.verdict
-            avg_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
-            summary = f"Análise consolidada por {len(verdict_bearing_results)} modelo(s) decisor(es) com apoio de {len(results) - len(verdict_bearing_results)} módulo(s) de features."
+            # Prioriza veredito conclusivo (FAKE / VERDADEIRO / SUSPEITO) sobre INCONCLUSIVO
+            conclusive = [r for r in verdict_bearing_results if r.verdict != Verdict.INCONCLUSIVO]
+            if conclusive:
+                best_result = max(conclusive, key=lambda r: r.confidence)
+                dominant_verdict = best_result.verdict
+                final_confidence = best_result.confidence
+            else:
+                dominant_verdict = Verdict.INCONCLUSIVO
+                final_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
+
+            # Prioriza o resumo explicativo do LLM Judge se disponível, senão do fact_check_api
+            judge_res = next((r for r in verdict_bearing_results if r.analyzer_name == "llm_judge" and r.summary), None)
+            fc_res = next((r for r in verdict_bearing_results if r.analyzer_name == "fact_check_api" and r.summary), None)
+
+            if judge_res and judge_res.summary and not judge_res.summary.startswith("Avaliador LLM offline"):
+                summary = judge_res.summary
+            elif fc_res and fc_res.summary:
+                summary = fc_res.summary
+            else:
+                summary = f"Análise consolidada por {len(verdict_bearing_results)} modelo(s) decisor(es) com apoio de {len(results) - len(verdict_bearing_results)} módulo(s) de features."
         else:
-            # Caso nenhum modelo tenha emitido veredito (ex: apenas HeuristicAnalyzer ativo)
             dominant_verdict = Verdict.INCONCLUSIVO
-            avg_confidence = 0.5
+            final_confidence = 0.50
             summary = "Extração de features concluída; nenhum modelo decisor emitiu veredito final."
 
         return AnalyzeResponse(
             claim=primary_claim or text[:120],
             verdict=dominant_verdict,
-            confidence=round(avg_confidence, 2),
+            confidence=round(final_confidence, 2),
             summary=summary,
             reasons=list(dict.fromkeys(all_reasons)),
-            sources=list(dict.fromkeys(all_sources))
+            sources=list(dict.fromkeys(all_sources)),
         )
+
 
