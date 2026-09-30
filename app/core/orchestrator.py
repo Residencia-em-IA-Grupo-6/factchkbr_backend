@@ -37,13 +37,15 @@ class FactCheckOrchestrator:
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzeResponse:
         """
-        Executa os analisadores ativos e consolida o veredito.
-        Se claim_extractor estiver presente, ele extrai a alegação factual central primeiro
-        e repassa para os analisadores de checagem/LLM.
+        Executa o pipeline linear contextual:
+        1. Heurística (texto bruto, captura estilo e sensacionalismo)
+        2. Extrator de Alegações (spaCy + LLM, isola fatos atômicos e faz gatekeeping)
+        3. Fact-Check API & Leitura Horizontal (pesquisa evidências com a claim limpa)
+        4. LLM Judge (julga o fato embasado nas evidências e nas métricas)
         """
-        active_analyzers = self.get_active_analyzers()
+        active_map = {a.name: a for a in self.get_active_analyzers()}
 
-        if not active_analyzers:
+        if not active_map:
             return AnalyzeResponse(
                 claim=text[:100],
                 verdict=Verdict.INCONCLUSIVO,
@@ -53,31 +55,52 @@ class FactCheckOrchestrator:
                 sources=[]
             )
 
-        # Se claim_extractor estiver ativo, isola a alegação factual primeiro
-        extractor = next((a for a in active_analyzers if a.name == "claim_extractor"), None)
-        other_analyzers = [a for a in active_analyzers if a.name != "claim_extractor"]
-
         results: list[AnalyzerResult] = []
+
+        # 1. Heuristic Analyzer (Texto Bruto)
+        heuristic_features: dict[str, Any] = {}
+        if "heuristic" in active_map:
+            h_res = await active_map["heuristic"].analyze(text, urls)
+            results.append(h_res)
+            heuristic_features = h_res.raw_details or {}
+
+        # 2. Claim Extractor (spaCy Gatekeeper + LLM Decomposer)
         target_claim = text
+        if "claim_extractor" in active_map:
+            c_res = await active_map["claim_extractor"].analyze(text, urls)
+            results.append(c_res)
+            if c_res.claim:
+                target_claim = c_res.claim
+            else:
+                # Se gatekeeper descartou por ser ruído ou opinião pura, encerra o pipeline
+                assertions = (c_res.raw_details or {}).get("assertions", [])
+                if not assertions:
+                    return AnalyzeResponse(
+                        claim=text[:120],
+                        verdict=Verdict.INCONCLUSIVO,
+                        confidence=0.0,
+                        summary="Nenhuma alegação factual identificada (texto classificado como ruído, saudação ou mera opinião).",
+                        reasons=c_res.reasons or ["Sem predicado factual falseável."],
+                        sources=c_res.sources
+                    )
 
-        if extractor:
-            extractor_result = await extractor.analyze(text, urls)
-            results.append(extractor_result)
-            if extractor_result.claim:
-                target_claim = extractor_result.claim
+        # 3. Fact-Check API & Leitura Horizontal (com a claim isolada)
+        evidences: list[dict[str, Any]] = []
+        if "fact_check_api" in active_map:
+            fc_res = await active_map["fact_check_api"].analyze(target_claim, urls)
+            results.append(fc_res)
+            evidences = (fc_res.raw_details or {}).get("evidences", [])
 
-        if other_analyzers:
-            # Analisadores estilísticos/heurísticos analisam o texto bruto com formatação;
-            # APIs de checagem e LLMs analisam a alegação factual isolada.
-            tasks = []
-            for analyzer in other_analyzers:
-                if analyzer.name == "heuristic":
-                    tasks.append(analyzer.analyze(text, urls))
-                else:
-                    tasks.append(analyzer.analyze(target_claim, urls))
-
-            other_results: list[AnalyzerResult] = await asyncio.gather(*tasks, return_exceptions=False)
-            results.extend(other_results)
+        # 4. LLM Judge (com contexto de evidências e métricas)
+        if "llm_judge" in active_map:
+            judge = active_map["llm_judge"]
+            if hasattr(judge, "analyze_with_context"):
+                j_res = await judge.analyze_with_context(
+                    target_claim, urls, evidences=evidences, heuristic_features=heuristic_features
+                )
+            else:
+                j_res = await judge.analyze(target_claim, urls)
+            results.append(j_res)
 
         return self._consolidate(text, results)
 
