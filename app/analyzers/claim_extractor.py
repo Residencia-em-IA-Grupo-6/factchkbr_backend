@@ -377,26 +377,42 @@ class ClaimDecomposer:
         if provider.lower() == "openai" and not self.settings.OPENAI_API_KEY:
             return None
 
-        prompt = (
-            "Você é um especialista em jornalismo investigativo e Fact-Checking.\n"
-            "Sua tarefa é processar o texto e decompor qualquer período composto em proposições atômicas INDEPENDENTES.\n"
-            "Cada proposição atômica deve ser um fato único verificável, sem opiniões, sem apelos e em linguagem denotativa neutra.\n"
-            "Para cada proposição, extraia a tripla semântica (sujeito, predicado, objeto) e indique as fontes de verificação esperadas.\n\n"
-            f"Texto: \"{cleaned_text}\"\n"
-            f"Entidades pré-detectadas: {json.dumps(entities, ensure_ascii=False)}"
-        )
-
         system_instruction = (
-            "Retorne rigorosamente apenas um JSON com a chave 'assertions', que é uma lista de objetos contendo:\n"
-            "- id: inteiro (1, 2, ...)\n"
-            "- statement: string (fato atômico normalizado em ordem direta)\n"
-            "- triple: objeto com subject (string), predicate (string), object (string)\n"
-            "- suggested_source_types: lista com valores válidos: ['ORGAO_OFICIAL', 'AGENCIA_REGULADORA', 'PODER_JUDICIARIO', 'INSTITUTO_PESQUISA', 'AGENCIA_CHECAGEM', 'DADOS_PUBLICOS']\n"
-            "- is_check_worthy: boolean (true se for fato concreto)"
+            "Você é um motor analítico especializado em extração, normalização e decomposição de alegações factuais "
+            "para sistemas automatizados de checagem de fatos (Fact-Checking Pipeline).\n"
+            "Sua única responsabilidade é processar textos pré-filtrados (muitas vezes sensacionalistas, informais ou com ruídos "
+            "de pontuação/caixa alta) e decompô-los em proposições atômicas, falseáveis e independentes.\n\n"
+            "### DIRETRIZES FUNDAMENTAIS:\n"
+            "1. ATOMICIDADE:\n"
+            "   - Divida alegações compostas em afirmações unitárias. Cada fato deve poder ser classificado como 'Verdadeiro' ou 'Falso' de forma totalmente independente.\n"
+            "2. SEPARAÇÃO RIGOROSA DE ATRIBUIÇÃO (CITAÇÃO vs. CONTEÚDO):\n"
+            "   - Se o texto afirma que uma entidade declarou algo (ex: 'X disse que Y aconteceu'), gere OBRIGATORIAMENTE duas alegações separadas:\n"
+            "     a) A alegação de atribuição/fala: se X realmente declarou aquilo.\n"
+            "     b) A alegação de mérito: se Y realmente aconteceu no mundo real.\n"
+            "3. NORMALIZAÇÃO SEMÂNTICA SEM ALUCINAÇÃO:\n"
+            "   - Elimine hipérboles, sensacionalismo e exclamações.\n"
+            "   - Converta termos informais ou coloquiais para linguagem formal e objetiva.\n"
+            "   - NUNCA invente fatos ausentes. Preserve estritamente as entidades, locais e números informados no texto original.\n"
+            "   - Se uma informação for vaga (ex.: 'médicos afirmam' sem citar nomes), preserve a fonte genérica ('médicos não identificados').\n"
+            "4. FORMATAÇÃO E ESTRUTURA:\n"
+            "   - Responda EXCLUSIVAMENTE em formato JSON com a chave raiz 'assertions', contendo uma lista de objetos com:\n"
+            "     * id: número inteiro (1, 2, ...)\n"
+            "     * statement: string (fato atômico normalizado em ordem direta)\n"
+            "     * triple: objeto com subject (string), predicate (string), object (string)\n"
+            "     * suggested_source_types: lista com valores válidos: ['ORGAO_OFICIAL', 'AGENCIA_REGULADORA', 'PODER_JUDICIARIO', 'INSTITUTO_PESQUISA', 'AGENCIA_CHECAGEM', 'DADOS_PUBLICOS']\n"
+            "     * is_check_worthy: boolean (true se for fato verificável concreto, false se for irrelevante/não verificável)\n"
+            "   - Não inclua explicações, comentários introdutórios ou markdown em torno do JSON."
         )
 
-        # Timeout ajustado para modelos locais (ex: 9b rodando no Ollama)
-        timeout_seconds = 20.0 if provider.lower() == "ollama" else 10.0
+        prompt = (
+            f"Texto: \"{cleaned_text}\"\n"
+            f"Entidades pré-detectadas: {json.dumps(entities, ensure_ascii=False)}\n\n"
+            "Decomponha o texto acima em proposições atômicas, separando citações/declarações do conteúdo factual subjacente "
+            "e normalizando a linguagem para termos objetivos."
+        )
+
+        # Timeout ajustado para modelos locais (ex: phi3.5 / qwen3.5 rodando no Ollama)
+        timeout_seconds = 45.0 if provider.lower() == "ollama" else 15.0
 
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:

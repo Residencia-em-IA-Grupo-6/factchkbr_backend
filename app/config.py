@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Padrão: "ollama" com "qwen3.5:9b" para execução local gratuita
     LLM_PROVIDER: str = "ollama"  # "ollama" | "openai"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen3.5:9b"
+    OLLAMA_MODEL: str = "phi3.5"
 
     # Chaves e integrações com APIs externas (caso LLM_PROVIDER="openai")
     GOOGLE_FACTCHECK_API_KEY: str | None = None
