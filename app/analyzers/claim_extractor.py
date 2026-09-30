@@ -395,7 +395,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
         self.settings = get_settings()
         self.preprocessor = SpacyPreprocessor()
         self.http_client = httpx.AsyncClient(
-            timeout=45.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
+            timeout=65.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
             limits=httpx.Limits(max_keepalive_connections=25, max_connections=50),
         )
         self.decomposer = LLMClaimDecomposer(self.http_client)
@@ -420,8 +420,26 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
                 engine_used="spacy_gatekeeper_short_circuit",
             )
 
-        # Camada 2: Decomposição Atômica exclusivamente via LLM
-        assertions = await self.decomposer.decompose(cleaned, entities)
+        # Camada 2: Decomposição Atômica via LLM com recuperação resiliente
+        try:
+            assertions = await self.decomposer.decompose(cleaned, entities)
+            engine = f"llm:{self.settings.get_llm_model()}"
+        except Exception as e:
+            logger.warning("Falha ou timeout na decomposição via LLM (%s): %s. Preservando asserção direta.", self.settings.get_llm_model(), e)
+            assertions = [
+                AtomicAssertion(
+                    id=1,
+                    statement=cleaned,
+                    triple=KnowledgeTriple(
+                        subject=entities.get("ORG", [""])[0] if entities.get("ORG") else (entities.get("PER", [""])[0] if entities.get("PER") else "Brasil"),
+                        predicate="afirma/relata",
+                        object=cleaned[:120],
+                    ),
+                    is_check_worthy=True,
+                    suggested_source_types=infer_source_types(cleaned, entities),
+                )
+            ]
+            engine = f"llm_contingency:{type(e).__name__}"
 
         return ClaimExtractionContract(
             original_text=text,
@@ -429,7 +447,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
             entities=entities,
             assertions=assertions,
             discarded_fragments=[],
-            engine_used=f"llm:{self.settings.get_llm_model()}",
+            engine_used=engine,
         )
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
