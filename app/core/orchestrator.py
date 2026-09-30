@@ -137,26 +137,47 @@ class FactCheckOrchestrator:
         verdict_bearing_results = [r for r in results if r.verdict is not None]
 
         if verdict_bearing_results:
-            # Prioriza veredito conclusivo (FAKE / VERDADEIRO / SUSPEITO) sobre INCONCLUSIVO
+            fc_res = next((r for r in verdict_bearing_results if r.analyzer_name == "fact_check_api"), None)
+            judge_res = next((r for r in verdict_bearing_results if r.analyzer_name == "llm_judge"), None)
+
+            # Salvaguarda epistemológica: Ausência de evidência não é evidência de falsidade.
+            # Se não houver referências que comprovem que a alegação é falsa (desmentido de checador ou mídia),
+            # previne classificação precipitada como FAKE decorrente de factóide recente ou rumor sem cobertura.
+            has_debunk = False
+            if fc_res:
+                evidences = (fc_res.raw_details or {}).get("evidences", [])
+                has_debunk = any(
+                    e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
+                    or fc_res.verdict == Verdict.FAKE
+                    for e in evidences
+                ) or fc_res.verdict == Verdict.FAKE
+
             conclusive = [r for r in verdict_bearing_results if r.verdict != Verdict.INCONCLUSIVO]
             if conclusive:
                 best_result = max(conclusive, key=lambda r: r.confidence)
-                dominant_verdict = best_result.verdict
-                final_confidence = best_result.confidence
+                if best_result.verdict == Verdict.FAKE and not has_debunk:
+                    dominant_verdict = Verdict.INCONCLUSIVO
+                    final_confidence = 0.60
+                    all_reasons.append(
+                        "Ausência de referências comprobatórias de falsidade: a carência de dados ou matérias recentes impede a classificação como fake."
+                    )
+                else:
+                    dominant_verdict = best_result.verdict
+                    final_confidence = best_result.confidence
             else:
                 dominant_verdict = Verdict.INCONCLUSIVO
                 final_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
 
             # Prioriza o resumo explicativo do LLM Judge se disponível, senão do fact_check_api
-            judge_res = next((r for r in verdict_bearing_results if r.analyzer_name == "llm_judge" and r.summary), None)
-            fc_res = next((r for r in verdict_bearing_results if r.analyzer_name == "fact_check_api" and r.summary), None)
-
             if judge_res and judge_res.summary and not judge_res.summary.startswith("Avaliador LLM offline"):
                 summary = judge_res.summary
             elif fc_res and fc_res.summary:
                 summary = fc_res.summary
             else:
                 summary = f"Análise consolidada por {len(verdict_bearing_results)} modelo(s) decisor(es) com apoio de {len(results) - len(verdict_bearing_results)} módulo(s) de features."
+
+            if dominant_verdict == Verdict.INCONCLUSIVO and not any(k in summary.lower() for k in ("recente", "insuficiente", "ausência", "falta de", "imprecis")):
+                summary += " Não há referências suficientes para confirmar nem refutar a afirmação (imprecisão por escassez de dados ou acontecimento recente)."
         else:
             dominant_verdict = Verdict.INCONCLUSIVO
             final_confidence = 0.50

@@ -43,13 +43,24 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             return self._fallback_result(text)
 
         system_prompt = (
-            "Você é um perito em verificação de fatos e desinformação no Brasil.\n"
-            "Avalie a alegação recebida confrontando-a com as evidências de checadores e notícias coletadas.\n"
+            "Você é um perito sênior em verificação de fatos e desinformação no Brasil, seguindo as diretrizes metodológicas do IFCN (International Fact-Checking Network) e das principais agências de checagem brasileiras (Lupa, Aos Fatos, Fato ou Fake).\n"
+            "Sua tarefa é avaliar criticamente a alegação confrontando-a com as evidências recuperadas.\n\n"
+            "DIRETRIZES EPISTEMOLÓGICAS FUNDAMENTAIS:\n"
+            "1. REGRA DE OURO: A AUSÊNCIA DE PROVA NÃO É PROVA DE FALSIDADE.\n"
+            "   - NUNCA classifique uma alegação como 'FAKE' simplesmente porque não foram encontradas notícias ou checagens sobre ela.\n"
+            "   - Para classificar como 'FAKE', é OBRIGATÓRIO haver comprovação explícita de falsidade: desmentido de checador oficial, dados oficiais contrários ou provas de fraude/adulteração.\n\n"
+            "2. ATENÇÃO SOBRE O CAMPO 'verdict' (VERACIDADE DA ALEGAÇÃO):\n"
+            "   - O campo 'verdict' refere-se ESTRITAMENTE à veracidade da ALEGAÇÃO RECEBIDA (e NÃO à veracidade da notícia de desmentido).\n"
+            "   - Se a alegação recebida for desmentida ou refutada pelas fontes (ex: 'vacinas causam autismo'), o veredito DEVE ser 'FAKE' (e NUNCA 'VERDADEIRO').\n"
+            "   - Se a alegação for comprovada como verdadeira pelas fontes, o veredito é 'VERDADEIRO'.\n"
+            "   - Se a alegação trouxer exagero, distorção ou meia-verdade, o veredito é 'SUSPEITO'.\n"
+            "   - Se NÃO houver referências suficientes para confirmar nem para refutar a afirmação (ex: fatos muito recentes em andamento, escassez de fontes ou matérias genéricas sem os dados específicos), o veredito DEVE ser 'INCONCLUSIVO'. Aponte explicitamente no resumo a imprecisão por falta de dados ou por se tratar de fato recente.\n\n"
+            "FORMATO DE RESPOSTA:\n"
             "Retorne RIGOROSAMENTE apenas um JSON no formato:\n"
             "{\n"
             '  "verdict": "VERDADEIRO" | "FAKE" | "SUSPEITO" | "INCONCLUSIVO",\n'
             '  "confidence": 0.0 a 1.0,\n'
-            '  "summary": "Resumo explicativo e conciso de 1 a 2 parágrafos",\n'
+            '  "summary": "Resumo explicativo detalhado e conciso de 1 a 2 parágrafos",\n'
             '  "reasons": ["Motivo 1", "Motivo 2"],\n'
             '  "sources": ["Nome do veículo ou fonte checada"]\n'
             "}"
@@ -65,15 +76,21 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                 rating_str = f" [Classificação: {rating}]" if rating else ""
                 user_content += f"- {src}: \"{title}\"{rating_str}\n"
             user_content += "\n"
+        else:
+            user_content += "Atenção: Nenhuma evidência, notícia ou checagem foi encontrada nas buscas externas.\n\n"
 
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
             score = heuristic_features["composite_sensationalism_score"]
             user_content += f"Nota de alerta: O texto original possui sinais expressivos de sensacionalismo/apelo (índice: {score:.2f}).\n\n"
 
-        user_content += "Avalie as evidências e emita o veredito final com justificativa fundamentada."
+        user_content += (
+            "Avalie as evidências e emita o veredito final com justificativa fundamentada. "
+            "Lembre-se: se não houver referências que comprovem ou desmintam o fato, "
+            "o veredito deve ser INCONCLUSIVO (imprecisão por falta de informações ou fato recente)."
+        )
 
         try:
-            timeout = 35.0 if provider.lower() == "ollama" else 15.0
+            timeout = 65.0 if provider.lower() == "ollama" else 15.0
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     endpoint,

@@ -247,7 +247,10 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             return (
                 Verdict.INCONCLUSIVO,
                 0.50,
-                ["Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato."],
+                [
+                    "Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato.",
+                    "Imprecisão por falta de informações: ausência de registros jornalísticos ou oficiais (pode se tratar de acontecimento muito recente ou rumor sem cobertura comprovada).",
+                ],
             )
 
         # 1. Se houver checagem direta do Google Fact Check Tools (IFCN)
@@ -319,7 +322,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             Verdict.INCONCLUSIVO,
             0.55,
             [
-                f"Matérias encontradas em fontes de referência, porém sem termo explícito de desmentido ou confirmação direta: {', '.join(top_titles)}."
+                f"Matérias encontradas em fontes de referência, porém sem termo explícito de desmentido ou confirmação direta: {', '.join(top_titles)}.",
+                "Imprecisão por dados insuficientes: os registros tratam do assunto de forma genérica, sem comprovar nem desmentir categoricamente os pontos específicos da alegação.",
             ],
         )
 

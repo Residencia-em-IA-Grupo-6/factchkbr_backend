@@ -469,6 +469,40 @@ def test_select_primary_assertion_with_suggested_primary():
     assert chosen.id == 1
 
 
+def test_orchestrator_inconclusive_safeguard_without_debunk():
+    """Garante que a ausência de referências de desmentido resulte em INCONCLUSIVO (sem falsos FAKE)."""
+    orchestrator = FactCheckOrchestrator()
+
+    # Simula resultado de fact_check_api sem evidências de desmentido (INCONCLUSIVO)
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.INCONCLUSIVO,
+        confidence=0.55,
+        claim="Fatoide recente sem cobertura",
+        summary="Nenhuma checagem prévia foi encontrada.",
+        reasons=["Ausência de registros para este fato."],
+        sources=[],
+        raw_details={"evidences": []},
+    )
+
+    # Simula LLM judge que emitiu FAKE por inferência sem fonte
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.FAKE,
+        confidence=0.85,
+        claim="Fatoide recente sem cobertura",
+        summary="A alegação não possui dados confirmatórios.",
+        reasons=["Ausência de provas"],
+        sources=[],
+    )
+
+    response = orchestrator._consolidate("Fatoide recente sem cobertura", [fc_result, judge_result])
+    assert response.verdict == Verdict.INCONCLUSIVO
+    assert any("impedem a classificação como fake" in r.lower() or "ausência de referências" in r.lower() for r in response.reasons)
+    assert any(k in response.summary.lower() for k in ("recente", "insuficiente", "ausência", "dados", "imprecis"))
+
+
+
 
 
 
