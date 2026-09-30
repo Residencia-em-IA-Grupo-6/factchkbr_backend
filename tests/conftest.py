@@ -3,19 +3,25 @@ from unittest.mock import patch
 from app.analyzers.claim_extractor import LLMClaimDecomposer, infer_source_types
 from app.schemas.claim_extraction import (
     AtomicAssertion,
+    ClaimCategory,
     KnowledgeTriple,
     VerificationSourceType,
 )
 
 
-async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]]) -> list[AtomicAssertion]:
+async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]]) -> tuple[str | None, list[AtomicAssertion]]:
     """Mock offline e determinístico para testes unitários sem dependência do Ollama."""
+    lower = cleaned_text.lower()
+    if any(k in lower for k in ("bom dia", "eu acho", "vergonha", "absurdo")):
+        return None, []
+
     # Períodos compostos (ex.: 'porque')
-    if "porque" in cleaned_text.lower():
-        return [
+    if "porque" in lower:
+        assertions = [
             AtomicAssertion(
                 id=1,
                 statement="O Ministério da Saúde cancelou a compra dos remédios.",
+                category=ClaimCategory.FACTUAL_CLAIM,
                 triple=KnowledgeTriple(
                     subject="Ministério da Saúde",
                     predicate="cancelou",
@@ -27,6 +33,7 @@ async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]
             AtomicAssertion(
                 id=2,
                 statement="O laboratório farmacêutico fraudou os testes clínicos.",
+                category=ClaimCategory.FACTUAL_CLAIM,
                 triple=KnowledgeTriple(
                     subject="laboratório farmacêutico",
                     predicate="fraudou",
@@ -36,6 +43,7 @@ async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]
                 suggested_source_types=[VerificationSourceType.AGENCIA_CHECAGEM],
             ),
         ]
+        return assertions[0].statement, assertions
 
     sources = infer_source_types(cleaned_text, entities)
     subject = "Sujeito"
@@ -43,7 +51,6 @@ async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]
     obj = cleaned_text
     stmt = cleaned_text
 
-    lower = cleaned_text.lower()
     if "médico" in lower or "vermes" in lower:
         subject = "Médico"
         predicate = "extrai"
@@ -86,15 +93,17 @@ async def _mock_decompose(self, cleaned_text: str, entities: dict[str, list[str]
         predicate = "acabou de suspender"
         obj = "pagamentos"
 
-    return [
+    assertions = [
         AtomicAssertion(
             id=1,
             statement=stmt,
+            category=ClaimCategory.FACTUAL_CLAIM,
             triple=KnowledgeTriple(subject=subject, predicate=predicate, object=obj),
             is_check_worthy=True,
             suggested_source_types=sources,
         )
     ]
+    return stmt, assertions
 
 
 @pytest.fixture(autouse=True)

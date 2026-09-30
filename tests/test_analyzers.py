@@ -403,38 +403,23 @@ async def test_llm_judge_offline_fallback():
     assert "offline" in res.summary.lower() or "ollama" in res.summary.lower()
 
 
-def test_conversational_prefix_stripping():
-    """Garante que bordões conversacionais e desabafos iniciais sejam removidos pelo preprocessor."""
-    from app.analyzers.claim_extractor import SpacyPreprocessor
-
-    preprocessor = SpacyPreprocessor()
-    cleaned = preprocessor.clean_text("Não adianta brigar comigo. Vacinas causam autismo. Tá na bula")
-    assert "não adianta brigar" not in cleaned.lower()
-    assert "vacinas causam autismo" in cleaned.lower()
-
-    cleaned_2 = preprocessor.clean_text("Acredite se quiser: O desemprego caiu 5% no último trimestre")
-    assert "acredite se quiser" not in cleaned_2.lower()
-    assert "desemprego caiu" in cleaned_2.lower()
-
-
-def test_select_primary_assertion_prioritizes_substantive_claim():
-    """Valida a priorização da asserção substantiva de interesse público sobre ruído conversacional."""
-    from app.schemas.claim_extraction import KnowledgeTriple, VerificationSourceType
-    from app.analyzers.claim_extractor import (
-        AtomicAssertion,
-        select_primary_assertion,
-    )
+def test_select_primary_assertion_by_category():
+    """Valida a priorização da asserção substantiva baseada na taxonomia semântica (sem listas hardcoded)."""
+    from app.schemas.claim_extraction import AtomicAssertion, ClaimCategory, KnowledgeTriple, VerificationSourceType
+    from app.analyzers.claim_extractor import select_primary_assertion
 
     noise_assertion = AtomicAssertion(
         id=1,
-        statement="Brigar não é benéfico.",
-        triple=KnowledgeTriple(subject="Brigar", predicate="não é", object="benéfico"),
+        statement="Não adianta brigar comigo.",
+        category=ClaimCategory.CONVERSATIONAL_NOISE,
+        triple=KnowledgeTriple(subject="sujeito", predicate="brigar", object="comigo"),
         suggested_source_types=[],
         is_check_worthy=False,
     )
     substantive_assertion = AtomicAssertion(
         id=2,
         statement="Vacinas causam autismo.",
+        category=ClaimCategory.FACTUAL_CLAIM,
         triple=KnowledgeTriple(subject="Vacinas", predicate="causam", object="autismo"),
         suggested_source_types=[
             VerificationSourceType.AGENCIA_REGULADORA,
@@ -442,18 +427,46 @@ def test_select_primary_assertion_prioritizes_substantive_claim():
         ],
         is_check_worthy=True,
     )
-    citation_assertion = AtomicAssertion(
+    attribution_assertion = AtomicAssertion(
         id=3,
-        statement="A afirmação consta na bula.",
-        triple=KnowledgeTriple(subject="Afirmação", predicate="consta", object="bula"),
-        suggested_source_types=[],
-        is_check_worthy=False,
+        statement="A afirmação está na bula.",
+        category=ClaimCategory.ATTRIBUTION,
+        triple=KnowledgeTriple(subject="Afirmação", predicate="está", object="bula"),
+        suggested_source_types=[VerificationSourceType.DADOS_PUBLICOS],
+        is_check_worthy=True,
     )
 
-    chosen = select_primary_assertion([noise_assertion, substantive_assertion, citation_assertion])
+    chosen = select_primary_assertion([noise_assertion, substantive_assertion, attribution_assertion])
     assert chosen is not None
     assert chosen.statement == "Vacinas causam autismo."
+    assert chosen.category == ClaimCategory.FACTUAL_CLAIM
 
+
+def test_select_primary_assertion_with_suggested_primary():
+    """Valida a correspondência direta com o primary_claim identificado pelo modelo semântico."""
+    from app.schemas.claim_extraction import AtomicAssertion, ClaimCategory, KnowledgeTriple, VerificationSourceType
+    from app.analyzers.claim_extractor import select_primary_assertion
+
+    a1 = AtomicAssertion(
+        id=1,
+        statement="A taxa de juros subiu 0.5%",
+        category=ClaimCategory.FACTUAL_CLAIM,
+        triple=KnowledgeTriple(subject="taxa de juros", predicate="subiu", object="0.5%"),
+        suggested_source_types=[VerificationSourceType.ORGAO_OFICIAL],
+        is_check_worthy=True,
+    )
+    a2 = AtomicAssertion(
+        id=2,
+        statement="O ministro declarou que a inflação está controlada",
+        category=ClaimCategory.ATTRIBUTION,
+        triple=KnowledgeTriple(subject="ministro", predicate="declarou", object="inflação controlada"),
+        suggested_source_types=[VerificationSourceType.ORGAO_OFICIAL],
+        is_check_worthy=True,
+    )
+
+    chosen = select_primary_assertion([a1, a2], suggested_primary="taxa de juros subiu 0.5%")
+    assert chosen is not None
+    assert chosen.id == 1
 
 
 

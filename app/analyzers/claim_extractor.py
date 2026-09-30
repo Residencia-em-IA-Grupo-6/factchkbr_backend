@@ -22,6 +22,7 @@ from app.core.registry import register_analyzer
 from app.schemas.analysis import AnalyzerResult
 from app.schemas.claim_extraction import (
     AtomicAssertion,
+    ClaimCategory,
     ClaimExtractionContract,
     KnowledgeTriple,
     VerificationSourceType,
@@ -30,30 +31,18 @@ from app.schemas.claim_extraction import (
 logger = logging.getLogger("factchkbr.analyzers.claim_extractor")
 
 # ==============================================================================
-# LIMPEZA & PADRÕES DE ALARME / RUÍDO (CPU)
+# LIMPEZA & PADRÕES ESTRUTURAIS (CPU)
 # ==============================================================================
 
 RE_ALARM_SYMBOLS = re.compile(r"[🚨⚠️💣🔥🛑📢👀⚡🇧🇷❌‼️⁉️]+")
 RE_PUNCT_COLLAPSE = re.compile(r"([!?.]){2,}")
 RE_WHITESPACE = re.compile(r"\s+")
 RE_ALARM_HEADERS = re.compile(
-    r"^(?:(?:URGENTE|BOMBA|ALERTA|ATENÇÃO BRASIL|VEJA|OLHE|COMPARTILHEM?|REPASSEM?)[!.:\s-]*)+",
+    r"^(?:(?:URGENTE|BOMBA|ALERTA|ATENÇÃO BRASIL|COMPARTILHEM?|REPASSEM?)[!.:\s-]*)+",
     re.IGNORECASE,
 )
 
-RE_CONVERSATIONAL_PREFIX = re.compile(
-    r"^(?:(?:não adianta brigar(?: comigo)?|não adianta reclamar|não adianta chiar|"
-    r"só digo uma coisa|acredite se quiser|falo a verdade|ouça bem|prestem atenção)[!.:\s,;-]*)+",
-    re.IGNORECASE,
-)
-
-OPINION_PATTERNS = re.compile(
-    r"\b(?:eu acho|eu acredito|minha opinião|penso que|na minha visão|vergonha|absurdo|"
-    r"maravilhosa|abençoe|deus abençoe|que deus|lindo demais|horroroso|incompetente e antipático)\b",
-    re.IGNORECASE,
-)
-
-# Siglas de órgãos e entidades institucionais relevantes para Fact-Checking
+# Siglas de órgãos e entidades institucionais para enriquecer reconhecimento de entidades
 KNOWN_ORGS = {
     "STF", "TSE", "STJ", "TCU", "ANVISA", "PF", "PRF", "IBGE", "MEC", "SUS",
     "FIOCRUZ", "PETROBRAS", "RECEITA FEDERAL", "GOVERNO FEDERAL", "INSS", "ANATEL",
@@ -67,7 +56,7 @@ KNOWN_ROLES = {
 
 
 def map_source_type(val: Any) -> VerificationSourceType | None:
-    """Normaliza strings ou alucinações de LLM para o enum estrito VerificationSourceType."""
+    """Normaliza strings ou retornos de LLM para o enum estrito VerificationSourceType."""
     if isinstance(val, VerificationSourceType):
         return val
     if not isinstance(val, str):
@@ -76,42 +65,24 @@ def map_source_type(val: Any) -> VerificationSourceType | None:
     for st in VerificationSourceType:
         if st.value == normalized:
             return st
-    val_lower = val.lower()
-    if any(k in val_lower for k in ("médic", "doutor", "saúde", "pesquisa", "hospital", "estudo", "cirurgia")):
-        return VerificationSourceType.INSTITUTO_PESQUISA
-    if any(k in val_lower for k in ("tribunal", "juiz", "vara", "justiça", "judiciário", "stf", "moro")):
-        return VerificationSourceType.PODER_JUDICIARIO
-    if any(k in val_lower for k in ("anvisa", "regulador", "agência reguladora", "anatel")):
-        return VerificationSourceType.AGENCIA_REGULADORA
-    if any(k in val_lower for k in ("governo", "oficial", "ministério", "diário", "receita")):
-        return VerificationSourceType.ORGAO_OFICIAL
-    if any(k in val_lower for k in ("checagem", "fact-check", "lupa", "fatos")):
-        return VerificationSourceType.AGENCIA_CHECAGEM
-    return VerificationSourceType.DADOS_PUBLICOS
+    return None
 
 
-def infer_source_types(text: str, entities: dict[str, list[str]]) -> list[VerificationSourceType]:
-    """Infere tipos de fontes oficiais recomendadas a partir do texto e entidades detectadas."""
-    sources: list[VerificationSourceType] = []
-    combined = (text + " " + " ".join(e for cat in entities.values() for e in cat)).lower()
+def map_claim_category(val: Any) -> ClaimCategory:
+    """Normaliza strings ou retornos de LLM para o enum ClaimCategory."""
+    if isinstance(val, ClaimCategory):
+        return val
+    if isinstance(val, str):
+        norm = val.strip().upper().replace(" ", "_").replace("-", "_")
+        for cat in ClaimCategory:
+            if cat.value == norm:
+                return cat
+    return ClaimCategory.FACTUAL_CLAIM
 
-    if any(k in combined for k in ("anvisa", "anatel", "bacen", "aneel", "ans", "antt", "cvm", "ibama")):
-        sources.append(VerificationSourceType.AGENCIA_REGULADORA)
-    if any(k in combined for k in ("ministério", "governo", "receita federal", "diário oficial", "prefeitura", "presidência")):
-        sources.append(VerificationSourceType.ORGAO_OFICIAL)
-    if any(k in combined for k in ("stf", "stj", "tse", "tcu", "cnj", "justiça", "tribunal", "moraes", "juiz", "vara", "moro")):
-        sources.append(VerificationSourceType.PODER_JUDICIARIO)
-    if any(k in combined for k in ("médico", "doutor", "fiocruz", "ibge", "ipea", "inpe", "usp", "universidade", "estudo", "pesquisa", "hospital", "cirurgia")):
-        sources.append(VerificationSourceType.INSTITUTO_PESQUISA)
-    if any(k in combined for k in ("vacina", "remédio", "remédios", "medicamento", "saúde", "infarto", "coração", "lote", "adulterado")):
-        if VerificationSourceType.AGENCIA_REGULADORA not in sources:
-            sources.append(VerificationSourceType.AGENCIA_REGULADORA)
-        if VerificationSourceType.ORGAO_OFICIAL not in sources:
-            sources.append(VerificationSourceType.ORGAO_OFICIAL)
 
-    if not sources:
-        sources = [VerificationSourceType.DADOS_PUBLICOS, VerificationSourceType.AGENCIA_CHECAGEM]
-    return sources
+def infer_source_types(text: str = "", entities: dict[str, list[str]] | None = None) -> list[VerificationSourceType]:
+    """Helper de retrocompatibilidade para inferência de fontes padrão."""
+    return [VerificationSourceType.DADOS_PUBLICOS, VerificationSourceType.AGENCIA_CHECAGEM]
 
 
 # ==============================================================================
@@ -119,7 +90,7 @@ def infer_source_types(text: str, entities: dict[str, list[str]]) -> list[Verifi
 # ==============================================================================
 
 class SpacyPreprocessor:
-    """Higienização de ruídos, extração de entidades e gatekeeping sintático com spaCy."""
+    """Higienização de ruídos estruturais, extração de entidades e gatekeeping sintático."""
 
     def __init__(self) -> None:
         for model in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
@@ -136,16 +107,15 @@ class SpacyPreprocessor:
             )
 
     def clean_text(self, text: str) -> str:
-        """Remove emojis de alarme, pontuações de pânico e decanta alertas sensacionalistas."""
+        """Remove emojis de alarme, normaliza pontuações repetidas e limpa alertas de manchete."""
         t = RE_ALARM_SYMBOLS.sub(" ", text)
         t = re.sub(r"\?{2,}", "?", t)
         t = re.sub(r"!{2,}", ".", t)
         t = re.sub(r"\.{2,}", ".", t)
         t = RE_WHITESPACE.sub(" ", t).strip()
 
-        # Remove alertas de topo repetidos e bordões conversacionais iniciais
+        # Remove prefixos puramente sensacionalistas de manchete (ex: BOMBA!! URGENTE: ...)
         t = RE_ALARM_HEADERS.sub("", t).strip()
-        t = RE_CONVERSATIONAL_PREFIX.sub("", t).strip()
         t = re.sub(r"^[\s,;.:-]+", "", t).strip()
         return t
 
@@ -159,7 +129,6 @@ class SpacyPreprocessor:
         for ent in doc.ents:
             lbl = ent.label_
             text_clean = ent.text.strip()
-            # Calibração taxonômica de siglas institucionais e cargos
             if text_clean.upper() in KNOWN_ORGS:
                 lbl = "ORG"
             elif text_clean.lower() in KNOWN_ROLES:
@@ -168,7 +137,6 @@ class SpacyPreprocessor:
             if lbl in entities and text_clean not in entities[lbl]:
                 entities[lbl].append(text_clean)
 
-        # Identifica papéis, profissões e órgãos que o modelo de NER pequeno possa não ter marcado
         for token in doc:
             tok_text = token.text.strip()
             if tok_text.lower() in KNOWN_ROLES and tok_text not in entities["PER"]:
@@ -183,21 +151,16 @@ class SpacyPreprocessor:
         Processa o texto em único passe (CPU com spaCy):
         - Extrai entidades (PER, ORG, LOC).
         - Atua como gatekeeper: retorna True se houver viabilidade sintática mínima
-          para formular uma alegação factual (verbo + substantivo/entidade).
-        - Descarta na raiz ruídos, saudações e opiniões declaradas.
+          para formular uma oração (presença de verbo/predicado + termo nominal/sujeito).
         """
         entities = self.extract_entities(text)
-        if not text or len(text.strip()) < 8:
-            return entities, False
-
-        # Descarte antecipado de opiniões declaradas ou cumprimentos
-        if OPINION_PATTERNS.search(text) and any(w in text.lower() for w in ("acho", "deus", "vergonha", "opinião", "bom dia")):
+        if not text or len(text.strip()) < 6:
             return entities, False
 
         doc = self.nlp(text)
-        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc) or any(t.dep_ == "nsubj" for t in doc)
+        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc) or any(t.dep_ in ("nsubj", "nsubj:pass") for t in doc)
         has_content = any(t.pos_ in ("NOUN", "PROPN", "NUM") for t in doc) or any(entities.values())
-        has_min_length = len(doc) >= 4
+        has_min_length = len(doc) >= 3
 
         is_viable = has_verb and has_content and has_min_length
         return entities, is_viable
@@ -208,38 +171,40 @@ SpacyNERCleaner = SpacyPreprocessor
 
 
 # ==============================================================================
-# 2. MOTOR DE DECOMPOSIÇÃO EXCLUSIVAMENTE VIA LLM (COM CACHE LRU)
+# 2. MOTOR DE DECOMPOSIÇÃO SEMÂNTICA EXCLUSIVAMENTE VIA LLM
 # ==============================================================================
 
-SYSTEM_PROMPT = """Você é um motor analítico especializado em extração, normalização e decomposição de alegações factuais para sistemas automatizados de checagem de fatos (Fact-Checking Pipeline).
-Sua única responsabilidade é processar textos pré-filtrados e decompô-los em proposições atômicas, falseáveis e independentes.
+SYSTEM_PROMPT = """Você é um especialista em Fact-Checking e Extração Semântica de Alegações (Claim Extraction & Check-Worthiness).
+Sua responsabilidade é analisar o texto recebido de redes sociais ou fontes públicas e estruturar suas proposições atômicas, identificando com precisão a alegação central a ser checada.
 
-### DIRETRIZES FUNDAMENTAIS:
-1. ATOMICIDADE:
-   - Divida alegações compostas em afirmações unitárias. Cada fato deve poder ser classificado como 'Verdadeiro' ou 'Falso' de forma totalmente independente.
+### DIRETRIZES SEMÂNTICAS:
+1. IDENTIFICAÇÃO DA ALEGAÇÃO CENTRAL (primary_claim):
+   - Textos frequentemente combinam desabafos, retórica interpessoal, saudações, menções a suporte ("tá na bula", "ouvi no rádio") e proposições empíricas sobre o mundo real.
+   - Identifique a alegação central ('primary_claim') como a proposição de fato substantivo sobre o mundo real (saúde, ciência, economia, atos de governo, estatísticas, eventos) com maior relevância pública e potencial de checagem empírica.
+   - Se o texto for puramente conversacional, retórico ou opinativo sem qualquer fato falseável sobre o mundo real, defina 'primary_claim' como null.
 
-2. SEPARAÇÃO RIGOROSA DE ATRIBUIÇÃO (CITAÇÃO vs. CONTEÚDO):
-   - Se o texto afirma que uma entidade declarou algo (ex: 'X disse que Y aconteceu'), gere OBRIGATORIAMENTE duas alegações separadas:
-     a) A alegação de atribuição/fala: se X realmente declarou aquilo.
-     b) A alegação de mérito: se Y realmente aconteceu no mundo real.
+2. TAXONOMIA DAS ASSERÇÕES (category):
+   - FACTUAL_CLAIM: Fato empírico verificável sobre o mundo real.
+   - ATTRIBUTION: Citação, fala atribuída a terceiros ou referência a suporte de mídia/documento.
+   - CONVERSATIONAL_NOISE: Desabafo, retórica, bordão ou fórmula conversacional sem valor factual falseável.
+   - OPINION: Juízo de valor subjetivo, crença pessoal ou saudação não falseável.
 
-3. NORMALIZAÇÃO SEMÂNTICA SEM ALUCINAÇÃO:
-   - Elimine hipérboles, sensacionalismo e exclamações.
-   - Converta termos informais ou coloquiais para linguagem formal e objetiva.
-   - NUNCA invente fatos ausentes. Preserve estritamente entidades, locais, datas e números informados no texto original.
-   - Se uma fonte for vaga ("médicos afirmam"), preserve a fonte genérica ("médicos não identificados").
+3. RELEVÂNCIA PARA CHECAGEM (is_check_worthy):
+   - Proposições FACTUAL_CLAIM devem ter 'is_check_worthy: true'.
+   - CONVERSATIONAL_NOISE e OPINION devem ter 'is_check_worthy: false'.
 
-4. PRIORIDADE FACTUAL & DESCARTE DE RUÍDO CONVERSACIONAL:
-   - Desabafos, provocações interpessoais ou bordões conversacionais (ex: 'não adianta brigar comigo', 'acredite se quiser', 'ouça bem', 'só digo isso') NÃO possuem teor factual falseável.
-   - Marque-os com 'is_check_worthy: false' ou descarte-os, priorizando como asserção principal (id 1) o fato substantivo falseável sobre o mundo real (saúde, ciência, política, economia, crimes, etc.).
-
-5. FORMATAÇÃO E ESTRUTURA:
-   - Responda EXCLUSIVAMENTE em formato JSON com a chave raiz 'assertions'.
-   - Cada objeto deve conter 'id', 'statement', 'triple' (com subject, predicate, object), 'suggested_source_types' e 'is_check_worthy'."""
+4. NORMALIZAÇÃO DENOTATIVA:
+   - Elimine sensacionalismo, pontuações de pânico e pronomes de desabafo pessoal.
+   - Preserve rigorosamente entidades, datas, locais e dados quantitativos expressos no texto original.
+   - Responda estritamente no schema JSON fornecido."""
 
 DECOMPOSITION_JSON_SCHEMA = {
     "type": "object",
     "properties": {
+        "primary_claim": {
+            "type": ["string", "null"],
+            "description": "Alegação factual central substantiva a ser checada, ou null se não houver fato falseável.",
+        },
         "assertions": {
             "type": "array",
             "items": {
@@ -247,6 +212,15 @@ DECOMPOSITION_JSON_SCHEMA = {
                 "properties": {
                     "id": {"type": "integer"},
                     "statement": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "FACTUAL_CLAIM",
+                            "ATTRIBUTION",
+                            "CONVERSATIONAL_NOISE",
+                            "OPINION",
+                        ],
+                    },
                     "triple": {
                         "type": "object",
                         "properties": {
@@ -273,12 +247,12 @@ DECOMPOSITION_JSON_SCHEMA = {
                     },
                     "is_check_worthy": {"type": "boolean"},
                 },
-                "required": ["id", "statement", "triple", "is_check_worthy"],
+                "required": ["id", "statement", "category", "triple", "suggested_source_types", "is_check_worthy"],
                 "additionalProperties": False,
             },
-        }
+        },
     },
-    "required": ["assertions"],
+    "required": ["primary_claim", "assertions"],
     "additionalProperties": False,
 }
 
@@ -290,20 +264,20 @@ class LLMClaimDecomposer:
         self.settings = get_settings()
         self._owned_client = http_client is None
         self.http_client = http_client or httpx.AsyncClient(
-            timeout=45.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
+            timeout=65.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
             limits=httpx.Limits(max_keepalive_connections=25, max_connections=50),
         )
         self._cache_maxsize = cache_maxsize
-        self._cache: OrderedDict[str, list[AtomicAssertion]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[str | None, list[AtomicAssertion]]] = OrderedDict()
 
-    def _get_from_cache(self, key: str) -> list[AtomicAssertion] | None:
+    def _get_from_cache(self, key: str) -> tuple[str | None, list[AtomicAssertion]] | None:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
         return None
 
-    def _save_to_cache(self, key: str, assertions: list[AtomicAssertion]) -> None:
-        self._cache[key] = assertions
+    def _save_to_cache(self, key: str, value: tuple[str | None, list[AtomicAssertion]]) -> None:
+        self._cache[key] = value
         if len(self._cache) > self._cache_maxsize:
             self._cache.popitem(last=False)
 
@@ -316,10 +290,9 @@ class LLMClaimDecomposer:
         self,
         cleaned_text: str,
         entities: dict[str, list[str]],
-    ) -> list[AtomicAssertion]:
+    ) -> tuple[str | None, list[AtomicAssertion]]:
         """
-        Decompõe texto em proposições atômicas exclusivamente via LLM.
-        Não utiliza fallback determinístico.
+        Decompõe texto em proposições atômicas e identifica alegação central via LLM.
         """
         cache_key = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
         cached = self._get_from_cache(cache_key)
@@ -329,8 +302,7 @@ class LLMClaimDecomposer:
         user_prompt = (
             f"Texto: \"{cleaned_text}\"\n"
             f"Entidades pré-detectadas: {json.dumps(entities, ensure_ascii=False)}\n\n"
-            "Decomponha o texto acima em proposições atômicas, separando citações/declarações do conteúdo factual subjacente "
-            "e normalizando a linguagem para termos objetivos."
+            "Analise o texto acima, classifique as proposições atômicas e identifique a alegação central substantiva a ser checada."
         )
 
         payload = {
@@ -350,87 +322,97 @@ class LLMClaimDecomposer:
             "temperature": 0.0,
         }
 
-        resp = await self.http_client.post(
-            self.settings.get_llm_endpoint(),
-            headers=self.settings.get_llm_headers(),
-            json=payload,
-        )
-
-        # Se json_schema não for aceito pelo provedor/modelo, tenta modo json_object
-        if resp.status_code == 400:
-            payload["response_format"] = {"type": "json_object"}
+        try:
             resp = await self.http_client.post(
                 self.settings.get_llm_endpoint(),
                 headers=self.settings.get_llm_headers(),
                 json=payload,
             )
 
-        resp.raise_for_status()
+            # Se json_schema não for aceito pelo provedor/modelo, tenta modo json_object
+            if resp.status_code == 400:
+                payload["response_format"] = {"type": "json_object"}
+                resp = await self.http_client.post(
+                    self.settings.get_llm_endpoint(),
+                    headers=self.settings.get_llm_headers(),
+                    json=payload,
+                )
 
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        raw_assertions = parsed.get("assertions", [])
-        inferred_sources = infer_source_types(cleaned_text, entities)
+            resp.raise_for_status()
 
-        assertions: list[AtomicAssertion] = []
-        for item in raw_assertions:
-            cleaned_sources: list[str] = []
-            for s in item.get("suggested_source_types", []):
-                mapped = map_source_type(s)
-                if mapped and mapped.value not in cleaned_sources:
-                    cleaned_sources.append(mapped.value)
-            if not cleaned_sources:
-                cleaned_sources = [s.value for s in inferred_sources]
-            item["suggested_source_types"] = cleaned_sources
-            assertions.append(AtomicAssertion.model_validate(item))
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            primary_claim = parsed.get("primary_claim")
+            raw_assertions = parsed.get("assertions", [])
 
-        self._save_to_cache(cache_key, assertions)
-        return assertions
+            assertions: list[AtomicAssertion] = []
+            for item in raw_assertions:
+                # Normaliza categoria taxonômica
+                item["category"] = map_claim_category(item.get("category"))
+
+                # Normaliza fontes
+                cleaned_sources: list[str] = []
+                for s in item.get("suggested_source_types", []):
+                    mapped = map_source_type(s)
+                    if mapped and mapped.value not in cleaned_sources:
+                        cleaned_sources.append(mapped.value)
+                if not cleaned_sources:
+                    cleaned_sources = [
+                        VerificationSourceType.DADOS_PUBLICOS.value,
+                        VerificationSourceType.AGENCIA_CHECAGEM.value,
+                    ]
+                item["suggested_source_types"] = cleaned_sources
+                assertions.append(AtomicAssertion.model_validate(item))
+
+            result = (primary_claim, assertions)
+            self._save_to_cache(cache_key, result)
+            return result
+
+        except Exception as exc:
+            logger.warning("Falha na decomposição via LLM (%s): %s", type(exc).__name__, exc)
+            return None, []
 
 
-def select_primary_assertion(assertions: list[AtomicAssertion]) -> AtomicAssertion | None:
+def select_primary_assertion(
+    assertions: list[AtomicAssertion],
+    suggested_primary: str | None = None,
+) -> AtomicAssertion | None:
     """
-    Seleciona a asserção central para checagem, priorizando proposições substantivas
-    do mundo real (saúde, ciência, política, etc.) sobre ruídos conversacionais ou metadados de citação.
+    Seleciona a asserção central para checagem baseando-se estritamente na taxonomia
+    semântica e na relevância para verificação (zero listas de vocabulário hard-coded).
     """
     if not assertions:
         return None
 
-    # 1. Filtra asserções que o modelo marcou como dignas de verificação
-    candidates = [a for a in assertions if a.is_check_worthy] or assertions
+    # 1. Se o modelo sugeriu um claim primário, localiza a asserção que melhor corresponde
+    if suggested_primary:
+        norm_target = suggested_primary.strip().lower()
+        for a in assertions:
+            stmt = a.statement.strip().lower()
+            if stmt == norm_target or norm_target in stmt or stmt in norm_target:
+                return a
+        # Se não houver correspondência exata, busca uma FACTUAL_CLAIM com checabilidade
+        factuals = [a for a in assertions if a.category == ClaimCategory.FACTUAL_CLAIM and a.is_check_worthy]
+        if factuals:
+            return factuals[0]
 
-    CONVERSATIONAL_TERMS = {"brigar", "conversar", "falar", "dizer", "ouvir", "achar", "pensar"}
-    SUBSTANTIVE_TERMS = {
-        "vacina", "autismo", "saúde", "remédio", "doença", "vírus", "medicamento",
-        "governo", "lei", "ministério", "stf", "anvisa", "ibge", "ipea", "pib", "crime",
-        "morte", "hospital", "bula", "efeito", "estudo"
-    }
+    # 2. Prioridade: asserção classificada como fato empírico substantivo (FACTUAL_CLAIM)
+    for a in assertions:
+        if a.category == ClaimCategory.FACTUAL_CLAIM and a.is_check_worthy:
+            return a
 
-    def score_assertion(a: AtomicAssertion) -> int:
-        score = 0
-        stmt = a.statement.lower()
-        pred = a.triple.predicate.lower()
-        subj = a.triple.subject.lower()
+    # 3. Segunda opção: asserção de atribuição checável (ex: declaração com mérito)
+    for a in assertions:
+        if a.category == ClaimCategory.ATTRIBUTION and a.is_check_worthy:
+            return a
 
-        # Penaliza ruídos conversacionais
-        if any(v in pred or v in subj or v in stmt for v in CONVERSATIONAL_TERMS):
-            score -= 15
+    # 4. Qualquer asserção restante marcada como passível de verificação
+    for a in assertions:
+        if a.is_check_worthy:
+            return a
 
-        # Bonifica termos substantivos de interesse público
-        score += sum(10 for t in SUBSTANTIVE_TERMS if t in stmt or t in subj)
-
-        # Bonifica fontes oficiais sugeridas (ex: Anvisa, OMS)
-        if a.suggested_source_types:
-            score += 5 * len(a.suggested_source_types)
-
-        # Se for mera citação de suporte (ex: "está na bula", "afirmação está", "disse que"), pequena penalidade frente ao mérito
-        if any(meta in stmt for meta in ("está na bula", "consta na bula", "afirmação está", "disse que")):
-            score -= 5
-
-        return score
-
-    return max(candidates, key=score_assertion)
+    return None
 
 
 # ==============================================================================
@@ -469,47 +451,40 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
             return ClaimExtractionContract(
                 original_text=text,
                 cleaned_text=cleaned,
+                primary_claim=None,
                 entities=entities,
                 assertions=[],
                 discarded_fragments=[cleaned] if cleaned else [],
                 engine_used="spacy_gatekeeper_short_circuit",
             )
 
-        # Camada 2: Decomposição Atômica via LLM com recuperação resiliente
-        try:
-            assertions = await self.decomposer.decompose(cleaned, entities)
-            engine = f"llm:{self.settings.get_llm_model()}"
-        except Exception as e:
-            logger.warning("Falha ou timeout na decomposição via LLM (%s): %s. Preservando asserção direta.", self.settings.get_llm_model(), e)
-            assertions = [
-                AtomicAssertion(
-                    id=1,
-                    statement=cleaned,
-                    triple=KnowledgeTriple(
-                        subject=entities.get("ORG", [""])[0] if entities.get("ORG") else (entities.get("PER", [""])[0] if entities.get("PER") else "Brasil"),
-                        predicate="afirma/relata",
-                        object=cleaned[:120],
-                    ),
-                    is_check_worthy=True,
-                    suggested_source_types=infer_source_types(cleaned, entities),
-                )
-            ]
-            engine = f"llm_contingency:{type(e).__name__}"
+        # Camada 2: Decomposição Semântica e Atômica exclusivamente via LLM
+        primary_claim, assertions = await self.decomposer.decompose(cleaned, entities)
+
+        # Seleciona asserção principal usando a taxonomia semântica (sem hardcoded)
+        primary_assertion = select_primary_assertion(assertions, primary_claim)
+        final_primary_claim = primary_claim or (primary_assertion.statement if primary_assertion else None)
+
+        # Fragmentos descartados por serem ruído conversacional ou opinião
+        discarded = [
+            a.statement for a in assertions
+            if a.category in (ClaimCategory.CONVERSATIONAL_NOISE, ClaimCategory.OPINION)
+        ]
 
         return ClaimExtractionContract(
             original_text=text,
             cleaned_text=cleaned,
+            primary_claim=final_primary_claim,
             entities=entities,
             assertions=assertions,
-            discarded_fragments=[],
-            engine_used=engine,
+            discarded_fragments=discarded,
+            engine_used=f"llm:{self.settings.get_llm_model()}",
         )
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
         """Interface padrão do BaseAnalyzer consumida pelo FactCheckOrchestrator."""
         contract = await self.extract_contract(text)
-        primary_assertion = select_primary_assertion(contract.assertions)
-        primary_claim = primary_assertion.statement if primary_assertion else None
+        primary_claim = contract.primary_claim
 
         return AnalyzerResult(
             analyzer_name="claim_extractor",
@@ -564,14 +539,16 @@ def format_cli_result(result: AnalyzerResult) -> None:
         for a in assertions:
             idx = a.get("id", "-")
             stmt = a.get("statement", "")
+            cat = a.get("category", "")
             triple = a.get("triple", {})
             s = triple.get("subject", "?")
             p = triple.get("predicate", "?")
             o = triple.get("object", "?")
             sources = a.get("suggested_source_types", [])
             print(f"   [{idx}] Statement: \"{stmt}\"")
-            print(f"       ├─ Tripla:  ({s} ➔ {p} ➔ {o})")
-            print(f"       └─ Fontes:  {sources}")
+            print(f"       ├─ Categoria: {cat}")
+            print(f"       ├─ Tripla:    ({s} ➔ {p} ➔ {o})")
+            print(f"       └─ Fontes:    {sources}")
         print()
 
     if any(entities.values()):

@@ -12,6 +12,14 @@ class VerificationSourceType(str, Enum):
     DADOS_PUBLICOS = "DADOS_PUBLICOS"        # Portal da Transparência, Receita Federal, INSS
 
 
+class ClaimCategory(str, Enum):
+    """Classificação taxonômica da proposição conforme padrões de checagem (CheckThat! / ClaimReview)."""
+    FACTUAL_CLAIM = "FACTUAL_CLAIM"                  # Proposição empírica substantiva falseável sobre o mundo real
+    ATTRIBUTION = "ATTRIBUTION"                      # Citação, declaração atribuída a terceiros ou referência a suporte
+    CONVERSATIONAL_NOISE = "CONVERSATIONAL_NOISE"    # Ruído conversacional, desabafo, provocação ou retórica interpessoal
+    OPINION = "OPINION"                              # Juízo de valor subjetivo, crença moral ou saudação não falseável
+
+
 class KnowledgeTriple(BaseModel):
     """Tripla de Conhecimento (SPO) que formaliza a relação factual atômica."""
     subject: str = Field(..., description="Entidade ou sujeito principal que realiza/sofre a ação")
@@ -23,6 +31,10 @@ class AtomicAssertion(BaseModel):
     """Proposição atômica independente (fato único checável derivado do período)."""
     id: int = Field(..., description="Identificador sequencial da asserção")
     statement: str = Field(..., description="Fato normalizado em ordem direta e linguagem denotativa neutra")
+    category: ClaimCategory = Field(
+        default=ClaimCategory.FACTUAL_CLAIM,
+        description="Classificação taxonômica da asserção (FACTUAL_CLAIM, ATTRIBUTION, CONVERSATIONAL_NOISE, OPINION)"
+    )
     triple: KnowledgeTriple = Field(..., description="Tripla semântica sujeito-predicado-objeto")
     suggested_source_types: list[VerificationSourceType] = Field(
         default_factory=list,
@@ -40,6 +52,10 @@ class ClaimExtractionContract(BaseModel):
     """
     original_text: str = Field(..., description="Texto bruto de entrada recebido da rede social")
     cleaned_text: str = Field(..., description="Texto limpo e sanitizado sem sirenes, emojis ou apelos")
+    primary_claim: str | None = Field(
+        default=None,
+        description="Alegação factual central substantiva identificada semânticamente como objeto da checagem"
+    )
     entities: dict[str, list[str]] = Field(
         default_factory=dict,
         description="Entidades detectadas agrupadas por categoria (PER, ORG, LOC, MISC)"
