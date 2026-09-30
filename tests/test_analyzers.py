@@ -604,6 +604,159 @@ def test_orchestrator_debunk_precedence_over_hallucinated_verdadeiro():
     assert any("prevalência de checagem oficial" in r.lower() for r in response.reasons)
 
 
+def test_fact_check_api_aggregate_sub_verdicts_mixed():
+    """Valida o impacto no score e veredito quando há mistura de alegação falsa e verdadeira."""
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+    analyzer = FactCheckApiAnalyzer()
+
+    sub_results = [
+        {
+            "statement": "vacinas causam autismo",
+            "verdict": Verdict.FAKE,
+            "confidence": 0.95,
+            "justification": "Desmentido pela comunidade médica e científica.",
+            "sources": ["Fiocruz"],
+            "evidences": [],
+        },
+        {
+            "statement": "vacinas são distribuídas gratuitamente no SUS",
+            "verdict": Verdict.VERDADEIRO,
+            "confidence": 0.90,
+            "justification": "Confirmado pelo Ministério da Saúde e Programa Nacional de Imunizações.",
+            "sources": ["Ministério da Saúde"],
+            "evidences": [],
+        },
+    ]
+
+    verdict, confidence, reasons = analyzer.aggregate_sub_verdicts(sub_results)
+    # Conteúdo misto resulta em SUSPEITO
+    assert verdict == Verdict.SUSPEITO
+    assert confidence >= 0.85
+    assert any("conteúdo misto" in r.lower() for r in reasons)
+    assert any("vacinas causam autismo" in r for r in reasons)
+    assert any("vacinas são distribuídas gratuitamente" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_fact_check_api_multi_claim_isolated_checking():
+    """Verifica se fact_check_api executa checagem de cada alegação isoladamente quando passado 'assertions'."""
+    from unittest.mock import AsyncMock, patch
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+
+    analyzer = FactCheckApiAnalyzer()
+
+    # Mock das funções de busca
+    with patch.object(analyzer, "check_single_claim", new_callable=AsyncMock) as mock_single:
+        mock_single.side_effect = [
+            {
+                "statement": "alegação 1",
+                "verdict": Verdict.FAKE,
+                "confidence": 0.9,
+                "justification": "Falsidade comprovada 1",
+                "sources": ["Fonte A"],
+                "evidences": [],
+            },
+            {
+                "statement": "alegação 2",
+                "verdict": Verdict.VERDADEIRO,
+                "confidence": 0.88,
+                "justification": "Verdade comprovada 2",
+                "sources": ["Fonte B"],
+                "evidences": [],
+            },
+        ]
+
+        res = await analyzer.analyze("Texto completo", [], assertions=["alegação 1", "alegação 2"])
+
+        assert mock_single.call_count == 2
+        assert res.verdict == Verdict.SUSPEITO
+        assert res.raw_details["claims_checked"] == 2
+        assert len(res.raw_details["sub_claims"]) == 2
+
+
+def test_orchestrator_multi_claim_score_and_justification():
+    """Valida a consolidação do orquestrador com discriminação e justificativa por alegação."""
+    from app.schemas.analysis import SubClaimAnalysis
+
+    orchestrator = FactCheckOrchestrator()
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.SUSPEITO,
+        confidence=0.88,
+        claim="Alegação composta",
+        summary="Varredura avaliou 2 alegações isoladamente.",
+        reasons=["Conteúdo misto detectado."],
+        sources=["Fonte 1", "Fonte 2"],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": "O hospital foi inaugurado ontem",
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.90,
+                    "justification": "Confirmado pela assessoria oficial do governo.",
+                    "sources": ["Gov"],
+                },
+                {
+                    "statement": "Cinquenta pacientes morreram por erro médico",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.95,
+                    "justification": "Desmentido pela secretaria de saúde e perícia.",
+                    "sources": ["Aos Fatos"],
+                },
+            ]
+        },
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.SUSPEITO,
+        confidence=0.90,
+        claim="Alegação composta",
+        summary="O texto mistura um fato real com um boato infundado.",
+        reasons=["Uma alegação é verdadeira e outra é falsa."],
+        sources=["Gov", "Aos Fatos"],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": "O hospital foi inaugurado ontem",
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.90,
+                    "justification": "Inauguração oficial ocorreu de fato conforme cronograma público.",
+                },
+                {
+                    "statement": "Cinquenta pacientes morreram por erro médico",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.95,
+                    "justification": "Boato sem qualquer evidência fática, desmentido por órgãos oficiais.",
+                },
+            ]
+        },
+    )
+
+    response = orchestrator._consolidate("Texto composto de teste", [fc_result, judge_result])
+
+    # Verifica veredito composto e pontuação no score
+    assert response.verdict == Verdict.SUSPEITO
+    assert 0.85 <= response.confidence <= 1.0
+
+    # Verifica presença da lista estruturada sub_claims
+    assert len(response.sub_claims) == 2
+    assert isinstance(response.sub_claims[0], SubClaimAnalysis)
+    assert response.sub_claims[0].statement == "O hospital foi inaugurado ontem"
+    assert response.sub_claims[0].verdict == Verdict.VERDADEIRO
+    assert "inauguração" in response.sub_claims[0].justification.lower()
+
+    assert response.sub_claims[1].statement == "Cinquenta pacientes morreram por erro médico"
+    assert response.sub_claims[1].verdict == Verdict.FAKE
+    assert "boato" in response.sub_claims[1].justification.lower() or "desmentido" in response.sub_claims[1].justification.lower()
+
+    # Verifica razões detalhadas com pontuação de cada alegação
+    assert any("[alegação 1 - verdadeiro]" in r.lower() for r in response.reasons)
+    assert any("[alegação 2 - fake]" in r.lower() for r in response.reasons)
+
+
+
 
 
 

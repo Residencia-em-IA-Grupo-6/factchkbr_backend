@@ -34,6 +34,15 @@ class AnalyzeRequest(BaseModel):
     )
 
 
+class SubClaimAnalysis(BaseModel):
+    """Análise e checagem isolada de uma proposição factual específica."""
+    statement: str = Field(..., description="Texto da proposição factual individual")
+    verdict: Verdict = Field(..., description="Veredito específico desta proposição: VERDADEIRO, FAKE, SUSPEITO, INCONCLUSIVO")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Nível de confiança da análise desta proposição")
+    justification: str = Field(..., description="Justificativa sucinta detalhando por que a proposição é verdadeira ou falsa")
+    sources: list[str] = Field(default_factory=list, description="Fontes diretas consultadas para esta proposição")
+
+
 class AnalyzeResponse(BaseModel):
     """
     Payload de saída retornado para o Bot do Telegram.
@@ -64,6 +73,10 @@ class AnalyzeResponse(BaseModel):
     sources: list[str] = Field(
         default_factory=list,
         description="Fontes ou referências consultadas"
+    )
+    sub_claims: list[SubClaimAnalysis] = Field(
+        default_factory=list,
+        description="Checagem discriminada por proposição atômica identificada no texto"
     )
 
 

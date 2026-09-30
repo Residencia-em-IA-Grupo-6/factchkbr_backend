@@ -31,6 +31,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
         urls: list[str],
         evidences: list[dict[str, Any]] | None = None,
         heuristic_features: dict[str, Any] | None = None,
+        sub_claims: list[dict[str, Any]] | None = None,
     ) -> AnalyzerResult:
         """
         Executa avaliação factual via LLM embasada nas evidências externas recuperadas
@@ -62,6 +63,10 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             "   - Se a alegação afirma que algo 'NÃO PODE SER FEITO' ou 'NÃO OCORRE', e as fontes/desmentidos mostram que PODE SER FEITO ou dizem 'É falso que não pode', a alegação recebida é FALSA (verdict: 'FAKE').\n"
             "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Se o fato alegado é inverídico, o veredito é 'FAKE'.\n"
             "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a alegação 'foi desmentida', 'foi refutada', 'é falsa' ou 'incorreta', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
+            "4. AVALIAÇÃO DISCRIMINADA DE SUB-ALEGAÇÕES (claims_evaluation):\n"
+            "   - Se forem fornecidas múltiplas alegações atômicas, avalie CADA UMA isoladamente no campo 'claims_evaluation'.\n"
+            "   - Justifique pontualmente por que cada alegação é verdadeira ou falsa com base nas evidências.\n"
+            "   - O veredito geral ('verdict') deve refletir a combinação: se contiver alegações falsas e verdadeiras no mesmo texto, o veredito geral DEVE ser 'SUSPEITO'. Se todas forem falsas, 'FAKE'. Se todas forem verdadeiras, 'VERDADEIRO'.\n\n"
             "FORMATO DE RESPOSTA:\n"
             "Retorne RIGOROSAMENTE apenas um JSON no formato:\n"
             "{\n"
@@ -69,7 +74,15 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             '  "confidence": 0.0 a 1.0,\n'
             '  "summary": "Resumo explicativo detalhado e conciso de 1 a 2 parágrafos",\n'
             '  "reasons": ["Motivo 1", "Motivo 2"],\n'
-            '  "sources": ["Nome do veículo ou fonte checada"]\n'
+            '  "sources": ["Nome do veículo ou fonte checada"],\n'
+            '  "claims_evaluation": [\n'
+            '    {\n'
+            '      "statement": "texto da alegação avaliada",\n'
+            '      "verdict": "VERDADEIRO" | "FAKE" | "SUSPEITO" | "INCONCLUSIVO",\n'
+            '      "confidence": 0.0 a 1.0,\n'
+            '      "justification": "Explicação pontual do porquê esta alegação é verdadeira, falsa ou inconclusiva"\n'
+            '    }\n'
+            '  ]\n'
             "}"
         )
 
@@ -90,6 +103,15 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             user_content += "\n"
         else:
             user_content += "Atenção: Nenhuma evidência, notícia ou checagem foi encontrada nas buscas externas.\n\n"
+
+        if sub_claims:
+            user_content += "Alegações individuais isoladas para checagem discriminada:\n"
+            for i, sc in enumerate(sub_claims, 1):
+                s_stmt = sc.get("statement", "")
+                s_v = sc.get("verdict", "")
+                s_v_str = s_v.value if hasattr(s_v, "value") else str(s_v)
+                user_content += f"  [{i}] \"{s_stmt}\" (Varredura preliminar: {s_v_str})\n"
+            user_content += "\nPreencha obrigatoriamente o campo 'claims_evaluation' discriminando e justificando cada uma dessas alegações.\n\n"
 
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
             score = heuristic_features["composite_sensationalism_score"]
@@ -176,6 +198,30 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                         verdict = Verdict.VERDADEIRO
                         polarity_corrected = True
 
+                    # Processamento das sub-alegações avaliadas
+                    parsed_sub_claims = []
+                    raw_eval = parsed.get("claims_evaluation")
+                    if isinstance(raw_eval, list) and raw_eval:
+                        for item in raw_eval:
+                            if isinstance(item, dict):
+                                sub_v_raw = str(item.get("verdict", "INCONCLUSIVO")).upper()
+                                sub_v = Verdict[sub_v_raw] if sub_v_raw in Verdict.__members__ else Verdict.INCONCLUSIVO
+                                parsed_sub_claims.append({
+                                    "statement": item.get("statement", ""),
+                                    "verdict": sub_v,
+                                    "confidence": float(item.get("confidence", confidence)),
+                                    "justification": item.get("justification", ""),
+                                })
+                    elif sub_claims:
+                        # Fallback se o modelo não gerou o array claims_evaluation
+                        for sc in sub_claims:
+                            parsed_sub_claims.append({
+                                "statement": sc.get("statement", ""),
+                                "verdict": sc.get("verdict", verdict),
+                                "confidence": sc.get("confidence", confidence),
+                                "justification": sc.get("justification", summary),
+                            })
+
                     return AnalyzerResult(
                         analyzer_name="llm_judge",
                         verdict=verdict,
@@ -188,14 +234,15 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                             "model": model,
                             "provider": provider,
                             "polarity_corrected": polarity_corrected,
+                            "sub_claims": parsed_sub_claims,
                         },
                     )
         except Exception as e:
             logger.debug("LLM Judge (%s: %s) indisponível (%s). Usando retorno padrão.", provider, model, e)
 
-        return self._fallback_result(text)
+        return self._fallback_result(text, sub_claims=sub_claims)
 
-    def _fallback_result(self, text: str) -> AnalyzerResult:
+    def _fallback_result(self, text: str, sub_claims: list[dict[str, Any]] | None = None) -> AnalyzerResult:
         """Resultado padrão caso o provedor LLM esteja indisponível."""
         return AnalyzerResult(
             analyzer_name="llm_judge",
@@ -205,5 +252,10 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             summary="Avaliador LLM offline ou sem conexão com o servidor local do Ollama.",
             reasons=["Servidor LLM não respondeu à requisição de julgamento."],
             sources=[f"Ollama local ({self.settings.OLLAMA_MODEL})"],
+            raw_details={
+                "model": self.settings.get_llm_model(),
+                "provider": self.settings.LLM_PROVIDER,
+                "sub_claims": sub_claims or [],
+            },
         )
 

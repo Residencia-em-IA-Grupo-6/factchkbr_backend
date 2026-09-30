@@ -327,49 +327,168 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             ],
         )
 
-    async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
+    async def check_single_claim(self, claim_text: str) -> dict[str, Any]:
         """
-        Executa a checagem em 2 camadas: Google Fact Check Tools API e Leitura Horizontal.
+        Executa a checagem isolada para uma única proposição factual:
+        1. Consulta Google Fact Check Tools API
+        2. Executa Leitura Horizontal
+        3. Avalia veredito, confiança e fundamentação específica
         """
-        # 1. Consulta em paralelo: Google Fact Check API + Leitura Horizontal
-        fc_task = self.search_google_fact_check(text)
-        lateral_task = self.search_lateral_reading(text)
+        clean_text = claim_text.strip()
+        fc_task = self.search_google_fact_check(clean_text)
+        lat_task = self.search_lateral_reading(clean_text)
 
-        results = await asyncio.gather(fc_task, lateral_task, return_exceptions=True)
+        results = await asyncio.gather(fc_task, lat_task, return_exceptions=True)
         google_evidences = results[0] if isinstance(results[0], list) else []
         lateral_evidences = results[1] if isinstance(results[1], list) else []
-
         all_evidences = google_evidences + lateral_evidences
 
-        # 2. Avalia veredito e confiança baseado no conjunto de evidências
-        verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=text)
+        verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text)
 
-        # 3. Consolida fontes para exibição
-        sources_list: list[str] = []
-        for e in all_evidences:
-            src = f"{e.source_name}: {e.title}"
-            if src not in sources_list:
-                sources_list.append(src)
+        sources = []
+        for e in all_evidences[:3]:
+            sources.append(f"{e.source_name}: {e.title}")
 
-        if not sources_list:
-            sources_list = ["Google Fact Check Tools API / Leitura Horizontal em Mídia de Referência"]
+        if verdict == Verdict.FAKE:
+            justification = reasons[0] if reasons else "Desmentida por fontes e agências de checagem."
+        elif verdict == Verdict.VERDADEIRO:
+            justification = reasons[0] if reasons else "Confirmada por registros jornalísticos e fontes oficiais."
+        elif verdict == Verdict.SUSPEITO:
+            justification = reasons[0] if reasons else "Alegação distorcida, imprecisa ou fora de contexto."
+        else:
+            justification = "Ausência de referências comprobatórias ou de desmentido (fato recente ou escassez de dados)."
+
+        return {
+            "statement": clean_text,
+            "verdict": verdict,
+            "confidence": confidence,
+            "justification": justification,
+            "reasons": reasons,
+            "sources": sources,
+            "evidences": [e.model_dump() for e in all_evidences[:4]],
+        }
+
+    def aggregate_sub_verdicts(self, sub_results: list[dict[str, Any]]) -> tuple[Verdict, float, list[str]]:
+        """
+        Calcula o impacto composto das sub-alegações no score e no veredito geral:
+        - Misto (FAKE + VERDADEIRO): SUSPEITO (desinformação mista/engano)
+        - Todas FAKE: FAKE
+        - Todas VERDADEIRO: VERDADEIRO
+        - FAKE + INCONCLUSIVO: FAKE
+        - VERDADEIRO + INCONCLUSIVO: VERDADEIRO (ou SUSPEITO se houver distorção)
+        - Todas INCONCLUSIVO: INCONCLUSIVO
+        """
+        if not sub_results:
+            return Verdict.INCONCLUSIVO, 0.50, ["Nenhuma alegação checável foi fornecida."]
+
+        if len(sub_results) == 1:
+            r = sub_results[0]
+            return r["verdict"], r["confidence"], r["reasons"]
+
+        fake_claims = [r for r in sub_results if r["verdict"] == Verdict.FAKE]
+        true_claims = [r for r in sub_results if r["verdict"] == Verdict.VERDADEIRO]
+        suspect_claims = [r for r in sub_results if r["verdict"] == Verdict.SUSPEITO]
+        inconclusive_claims = [r for r in sub_results if r["verdict"] == Verdict.INCONCLUSIVO]
+
+        itemized_reasons: list[str] = []
+        for idx, r in enumerate(sub_results, 1):
+            stmt = r["statement"]
+            v = r["verdict"]
+            v_str = v.value if hasattr(v, "value") else str(v)
+            just = r.get("justification", "")
+            itemized_reasons.append(f"[Alegação {idx} - {v_str}]: \"{stmt}\" ➔ {just}")
+
+        # 1. Se contiver alegações falsas e verdadeiras no mesmo conteúdo -> SUSPEITO
+        if fake_claims and true_claims:
+            verdict = Verdict.SUSPEITO
+            avg_conf = sum(r["confidence"] for r in fake_claims + true_claims) / len(fake_claims + true_claims)
+            confidence = round(avg_conf, 2)
+            summary_reason = (
+                f"Conteúdo misto detectado: {len(fake_claims)} alegação(ões) falsa(s) e "
+                f"{len(true_claims)} verdadeira(s) identificadas no mesmo texto."
+            )
+            return verdict, confidence, [summary_reason] + itemized_reasons
+
+        # 2. Se contiver apenas alegações falsas (ou falsas + inconclusivas) -> FAKE
+        if fake_claims:
+            verdict = Verdict.FAKE
+            confidence = round(max(r["confidence"] for r in fake_claims), 2)
+            summary_reason = f"Falsidade factual: {len(fake_claims)} alegação(ões) desmentida(s) pelas fontes oficiais/checadores."
+            return verdict, confidence, [summary_reason] + itemized_reasons
+
+        # 3. Se contiver alegações suspeitas -> SUSPEITO
+        if suspect_claims:
+            verdict = Verdict.SUSPEITO
+            confidence = round(sum(r["confidence"] for r in suspect_claims) / len(suspect_claims), 2)
+            summary_reason = "Alegações classificadas como distorcidas ou fora de contexto pelas fontes."
+            return verdict, confidence, [summary_reason] + itemized_reasons
+
+        # 4. Se contiver apenas verdadeiras -> VERDADEIRO
+        if true_claims:
+            if inconclusive_claims:
+                verdict = Verdict.VERDADEIRO
+                confidence = round(sum(r["confidence"] for r in true_claims) / len(true_claims) * 0.9, 2)
+                summary_reason = f"{len(true_claims)} alegação(ões) confirmada(s) por fontes oficiais, com partes sem cobertura conclusiva."
+            else:
+                verdict = Verdict.VERDADEIRO
+                confidence = round(sum(r["confidence"] for r in true_claims) / len(true_claims), 2)
+                summary_reason = f"Todas as alegações ({len(true_claims)}) foram confirmadas por fontes oficiais e órgãos de referência."
+            return verdict, confidence, [summary_reason] + itemized_reasons
+
+        # 5. Todas inconclusivas -> INCONCLUSIVO
+        verdict = Verdict.INCONCLUSIVO
+        confidence = 0.55
+        summary_reason = "Nenhuma das alegações possui referências conclusivas suficientes para confirmação ou desmentido."
+        return verdict, confidence, [summary_reason] + itemized_reasons
+
+    async def analyze(self, text: str, urls: list[str], assertions: list[str] | None = None) -> AnalyzerResult:
+        """
+        Executa a checagem das alegações isoladamente.
+        Se 'assertions' for fornecido com múltiplas alegações, checa cada uma em paralelo.
+        Caso contrário, checa a alegação contida em 'text'.
+        """
+        targets = [a.strip() for a in assertions if a and a.strip()] if assertions else []
+        if not targets:
+            targets = [text.strip()] if text.strip() else []
+
+        # Limita a no máximo 4 alegações para evitar sobrecarga de rede
+        targets = targets[:4]
+
+        # Executa a checagem de cada alegação em paralelo
+        sub_results = await asyncio.gather(*[self.check_single_claim(t) for t in targets])
+
+        all_evidences = []
+        all_sources = []
+        for sr in sub_results:
+            all_evidences.extend(sr.get("evidences", []))
+            all_sources.extend(sr.get("sources", []))
+
+        verdict, confidence, reasons = self.aggregate_sub_verdicts(sub_results)
+
+        if len(sub_results) > 1:
+            summary = (
+                f"Varredura em fontes externas avaliou {len(sub_results)} alegações isoladamente. "
+                f"Resultado composto: {verdict.value} com {len(all_evidences)} registro(s) localizado(s)."
+            )
+        else:
+            summary = (
+                f"Varredura em fontes externas encontrou {len(all_evidences)} registro(s) relevante(s)."
+                if all_evidences
+                else "Nenhuma evidência externa direta localizada nas fontes consultadas."
+            )
 
         return AnalyzerResult(
             analyzer_name="fact_check_api",
             verdict=verdict,
             confidence=confidence,
             claim=text,
-            summary=(
-                f"Varredura em fontes externas encontrou {len(all_evidences)} registro(s) relevante(s)."
-                if all_evidences
-                else "Nenhuma evidência externa direta localizada nas fontes consultadas."
-            ),
+            summary=summary,
             reasons=reasons,
-            sources=sources_list[:5],
+            sources=list(dict.fromkeys(all_sources))[:6] or ["Mídia de Referência e Órgãos Oficiais"],
             raw_details={
                 "total_evidences": len(all_evidences),
-                "google_fact_checks_count": len(google_evidences),
-                "lateral_reading_count": len(lateral_evidences),
-                "evidences": [e.model_dump() for e in all_evidences[:6]],
+                "claims_checked": len(sub_results),
+                "sub_claims": sub_results,
+                "evidences": all_evidences,
             },
         )

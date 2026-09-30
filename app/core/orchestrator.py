@@ -16,6 +16,7 @@ from app.core.registry import registry
 from app.schemas.analysis import (
     AnalyzeResponse,
     AnalyzerResult,
+    SubClaimAnalysis,
     Verdict,
 )
 
@@ -91,6 +92,7 @@ class FactCheckOrchestrator:
 
         # 2. Claim Extractor (spaCy Gatekeeper + LLM Decomposer)
         target_claim = text
+        check_worthy_stmts: list[str] = []
         if "claim_extractor" in active_map:
             t0 = time.perf_counter()
             c_res = await active_map["claim_extractor"].analyze(text, urls)
@@ -117,27 +119,40 @@ class FactCheckOrchestrator:
                         sources=c_res.sources
                     )
 
-        # 3. Fact-Check API & Leitura Horizontal (com a claim isolada)
+            # Extrai proposições checáveis para checagem isolada
+            raw_assertions = (c_res.raw_details or {}).get("assertions", [])
+            for a in raw_assertions:
+                if isinstance(a, dict):
+                    if a.get("is_check_worthy", True) and a.get("statement"):
+                        check_worthy_stmts.append(a["statement"])
+
+        # 3. Fact-Check API & Leitura Horizontal (com a claim isolada e proposições atômicas)
         evidences: list[dict[str, Any]] = []
+        fc_sub_claims: list[dict[str, Any]] = []
         if "fact_check_api" in active_map:
             t0 = time.perf_counter()
-            fc_res = await active_map["fact_check_api"].analyze(target_claim, urls)
+            fc_res = await active_map["fact_check_api"].analyze(target_claim, urls, assertions=check_worthy_stmts)
             dur = time.perf_counter() - t0
             results.append(fc_res)
             evidences = (fc_res.raw_details or {}).get("evidences", [])
+            fc_sub_claims = (fc_res.raw_details or {}).get("sub_claims", [])
             logger.info("Etapa 'fact_check_api' concluída em %.3fs. %d evidência(s)", dur, len(evidences))
             if on_step:
                 cb = on_step("fact_check_api", fc_res, dur)
                 if asyncio.iscoroutine(cb):
                     await cb
 
-        # 4. LLM Judge (com contexto de evidências e métricas)
+        # 4. LLM Judge (com contexto de evidências, métricas e proposições isoladas)
         if "llm_judge" in active_map:
             t0 = time.perf_counter()
             judge = active_map["llm_judge"]
             if hasattr(judge, "analyze_with_context"):
                 j_res = await judge.analyze_with_context(
-                    target_claim, urls, evidences=evidences, heuristic_features=heuristic_features
+                    target_claim,
+                    urls,
+                    evidences=evidences,
+                    heuristic_features=heuristic_features,
+                    sub_claims=fc_sub_claims,
                 )
             else:
                 j_res = await judge.analyze(target_claim, urls)
@@ -175,10 +190,77 @@ class FactCheckOrchestrator:
         # Filtra apenas os analisadores que emitem veredito
         verdict_bearing_results = [r for r in results if r.verdict is not None]
 
-        if verdict_bearing_results:
-            fc_res = next((r for r in verdict_bearing_results if r.analyzer_name == "fact_check_api"), None)
-            judge_res = next((r for r in verdict_bearing_results if r.analyzer_name == "llm_judge"), None)
+        # Consolidar sub_claims discriminadas por alegação
+        fc_res = next((r for r in verdict_bearing_results if r.analyzer_name == "fact_check_api"), None)
+        judge_res = next((r for r in verdict_bearing_results if r.analyzer_name == "llm_judge"), None)
 
+        fc_sub_claims = (fc_res.raw_details or {}).get("sub_claims", []) if fc_res else []
+        judge_sub_claims = (judge_res.raw_details or {}).get("sub_claims", []) if judge_res else []
+
+        consolidated_sub_claims: list[SubClaimAnalysis] = []
+        base_sub_claims = judge_sub_claims if len(judge_sub_claims) >= len(fc_sub_claims) and judge_sub_claims else fc_sub_claims
+
+        if base_sub_claims:
+            for idx, item in enumerate(base_sub_claims):
+                stmt = item.get("statement", f"Alegação {idx+1}")
+                # Encontra entrada correspondente em judge e fc
+                j_match = next((j for j in judge_sub_claims if j.get("statement") == stmt), None)
+                if not j_match and idx < len(judge_sub_claims):
+                    j_match = judge_sub_claims[idx]
+
+                f_match = next((f for f in fc_sub_claims if f.get("statement") == stmt), None)
+                if not f_match and idx < len(fc_sub_claims):
+                    f_match = fc_sub_claims[idx]
+
+                # Determina veredito da sub-alegação
+                sub_v = item.get("verdict", Verdict.INCONCLUSIVO)
+                if j_match and j_match.get("verdict"):
+                    sub_v = j_match["verdict"]
+                elif f_match and f_match.get("verdict"):
+                    sub_v = f_match["verdict"]
+
+                if isinstance(sub_v, str):
+                    sub_v = Verdict[sub_v.upper()] if sub_v.upper() in Verdict.__members__ else Verdict.INCONCLUSIVO
+
+                # Determina confiança
+                sub_c = 0.80
+                if j_match and "confidence" in j_match:
+                    sub_c = j_match["confidence"]
+                elif f_match and "confidence" in f_match:
+                    sub_c = f_match["confidence"]
+                elif "confidence" in item:
+                    sub_c = item["confidence"]
+
+                # Determina justificativa pontual
+                sub_just = ""
+                if j_match and j_match.get("justification"):
+                    sub_just = j_match["justification"]
+                elif f_match and f_match.get("justification"):
+                    sub_just = f_match["justification"]
+                else:
+                    sub_just = item.get("justification", "Avaliação individual.")
+
+                # Determina fontes
+                sub_sources = []
+                if f_match and f_match.get("sources"):
+                    sub_sources = f_match["sources"]
+                elif item.get("sources"):
+                    sub_sources = item["sources"]
+
+                consolidated_sub_claims.append(
+                    SubClaimAnalysis(
+                        statement=stmt,
+                        verdict=sub_v,
+                        confidence=round(sub_c, 2),
+                        justification=sub_just,
+                        sources=sub_sources,
+                    )
+                )
+
+                sub_v_name = sub_v.value if hasattr(sub_v, "value") else str(sub_v)
+                all_reasons.append(f"[Alegação {idx+1} - {sub_v_name}]: \"{stmt}\" ➔ {sub_just}")
+
+        if verdict_bearing_results:
             # Salvaguarda epistemológica: Ausência de evidência não é evidência de falsidade.
             # Se não houver referências que comprovem que a alegação é falsa (desmentido de checador ou mídia),
             # previne classificação precipitada como FAKE decorrente de factóide recente ou rumor sem cobertura.
@@ -216,6 +298,25 @@ class FactCheckOrchestrator:
                 dominant_verdict = Verdict.INCONCLUSIVO
                 final_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
 
+            # Impacto composto no veredito se houver múltiplas sub-alegações consolidadas
+            if len(consolidated_sub_claims) > 1:
+                has_fake = any(sc.verdict == Verdict.FAKE for sc in consolidated_sub_claims)
+                has_true = any(sc.verdict == Verdict.VERDADEIRO for sc in consolidated_sub_claims)
+                has_suspect = any(sc.verdict == Verdict.SUSPEITO for sc in consolidated_sub_claims)
+
+                if has_fake and has_true:
+                    dominant_verdict = Verdict.SUSPEITO
+                    final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
+                elif has_suspect:
+                    dominant_verdict = Verdict.SUSPEITO
+                    final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
+                elif has_fake and not has_true:
+                    dominant_verdict = Verdict.FAKE
+                    final_confidence = max(sc.confidence for sc in consolidated_sub_claims)
+                elif has_true and not has_fake:
+                    dominant_verdict = Verdict.VERDADEIRO
+                    final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
+
             # Prioriza o resumo explicativo do LLM Judge se coerente com o veredito dominante, senão do fact_check_api
             if judge_res and judge_res.summary and not judge_res.summary.startswith("Avaliador LLM offline"):
                 j_summary_lower = judge_res.summary.lower()
@@ -244,6 +345,7 @@ class FactCheckOrchestrator:
             summary=summary,
             reasons=list(dict.fromkeys(all_reasons)),
             sources=list(dict.fromkeys(all_sources)),
+            sub_claims=consolidated_sub_claims,
         )
 
 

@@ -119,6 +119,15 @@ def print_step_trace(step_name: str, result: AnalyzerResult, duration: float, ra
         else:
             print("      • Evidências:            Nenhum registro encontrado nas fontes externas.")
 
+        sub_claims = raw.get("sub_claims", [])
+        if len(sub_claims) > 1:
+            print(f"      • Checagem Isolada de Proposições ({len(sub_claims)}):")
+            for idx, sc in enumerate(sub_claims, 1):
+                sc_v = sc.get("verdict")
+                sc_v_str = sc_v.value if hasattr(sc_v, "value") else str(sc_v)
+                sc_conf = sc.get("confidence", 0.0) * 100
+                print(f"        [{idx}] \"{sc.get('statement')}\" ➔ {sc_v_str} ({sc_conf:.1f}%)")
+
         print(f"      • Veredito Preliminar:   {v_str} (Confiança: {result.confidence * 100:.1f}%)")
 
     elif step_name == "llm_judge":
@@ -160,6 +169,16 @@ def format_cli_result(res: AnalyzeResponse, total_duration: float | None = None)
     print(f"⚖️  VEREDITO CONSOLIDADO: {verdict_display}")
     print(f"📊 GRAU DE CONFIANÇA:    {res.confidence * 100:.1f}%\n")
     print(f"📝 RESUMO EXPLICATIVO:\n   {res.summary}\n")
+
+    if res.sub_claims:
+        print(f"🧬 AVALIAÇÃO DISCRIMINADA POR ALEGAÇÃO ({len(res.sub_claims)}):")
+        for i, sc in enumerate(res.sub_claims, 1):
+            badge = v_icons.get(sc.verdict, sc.verdict.value)
+            print(f"   [{i}] {badge} ({sc.confidence * 100:.1f}%): \"{sc.statement}\"")
+            print(f"       └─ Justificativa: {sc.justification}")
+            if sc.sources:
+                print(f"       └─ Fontes:        {', '.join(sc.sources[:2])}")
+        print()
 
     if res.reasons:
         print(f"🔍 RAZÕES APONTADAS ({len(res.reasons)}):")
