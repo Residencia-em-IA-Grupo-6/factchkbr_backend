@@ -161,6 +161,14 @@ class SpacyPreprocessor:
             if lbl in entities and text_clean not in entities[lbl]:
                 entities[lbl].append(text_clean)
 
+        # Identifica papéis, profissões e órgãos que o modelo de NER pequeno possa não ter marcado
+        for token in doc:
+            tok_text = token.text.strip()
+            if tok_text.lower() in KNOWN_ROLES and tok_text not in entities["PER"]:
+                entities["PER"].append(tok_text)
+            elif tok_text.upper() in KNOWN_ORGS and tok_text not in entities["ORG"]:
+                entities["ORG"].append(tok_text)
+
         return entities
 
     def analyze(self, text: str) -> tuple[dict[str, list[str]], bool]:
@@ -180,7 +188,7 @@ class SpacyPreprocessor:
             return entities, False
 
         doc = self.nlp(text)
-        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc)
+        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc) or any(t.dep_ == "nsubj" for t in doc)
         has_content = any(t.pos_ in ("NOUN", "PROPN", "NUM") for t in doc) or any(entities.values())
         has_min_length = len(doc) >= 4
 

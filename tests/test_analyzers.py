@@ -291,5 +291,118 @@ async def test_claim_extractor_medical_action_rumor():
     assert triple["predicate"] == "extrai"
 
 
+def test_fact_check_api_evaluate_verdict_ifcn():
+    """Valida avaliação de veredito a partir de checagens IFCN do Google Fact Check."""
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer, EvidenceItem
+
+    analyzer = FactCheckApiAnalyzer()
+
+    # 1. Caso Falso / Mentira
+    ev_fake = [
+        EvidenceItem(
+            title="Não é verdade que vacina altera o DNA",
+            source_name="Agência Lupa",
+            url="https://lupa.news/exemplo",
+            rating="Falso",
+            is_fact_check=True,
+        )
+    ]
+    v_fake, conf_fake, reasons_fake = analyzer.evaluate_verdict(ev_fake)
+    assert v_fake == Verdict.FAKE
+    assert conf_fake >= 0.90
+    assert any("Agência Lupa" in r for r in reasons_fake)
+
+    # 2. Caso Verdadeiro / Comprovado
+    ev_true = [
+        EvidenceItem(
+            title="Anvisa aprova novo tratamento contra a dengue",
+            source_name="Fato ou Fake",
+            url="https://g1.globo.com/fato-ou-fake",
+            rating="Fato",
+            is_fact_check=True,
+        )
+    ]
+    v_true, conf_true, reasons_true = analyzer.evaluate_verdict(ev_true)
+    assert v_true == Verdict.VERDADEIRO
+    assert conf_true >= 0.90
+
+    # 3. Caso Enganoso / Fora de contexto
+    ev_misleading = [
+        EvidenceItem(
+            title="Vídeo com fala cortada distorce declaração",
+            source_name="Aos Fatos",
+            url="https://aosfatos.org",
+            rating="Enganoso",
+            is_fact_check=True,
+        )
+    ]
+    v_susp, conf_susp, _ = analyzer.evaluate_verdict(ev_misleading)
+    assert v_susp == Verdict.SUSPEITO
+    assert conf_susp >= 0.80
+
+
+def test_fact_check_api_evaluate_verdict_lateral_reading():
+    """Valida avaliação de veredito via Leitura Horizontal (notícias e órgãos de saúde)."""
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer, EvidenceItem
+
+    analyzer = FactCheckApiAnalyzer()
+
+    # 1. Desmentido detectado no título
+    ev_debunk = [
+        EvidenceItem(
+            title="É mentira que médico extraiu vermes do coração de consumidor de carne",
+            source_name="G1",
+            url="https://g1.globo.com/fato-ou-fake/noticia/123",
+            rating=None,
+            is_fact_check=False,
+        )
+    ]
+    v_debunk, conf_debunk, reasons_debunk = analyzer.evaluate_verdict(ev_debunk)
+    assert v_debunk == Verdict.FAKE
+    assert conf_debunk >= 0.80
+    assert any("desmentido ou contestação" in r for r in reasons_debunk)
+
+    # 2. Confirmação detectada no título
+    ev_confirm = [
+        EvidenceItem(
+            title="Anvisa determina suspensão imediata de lote de azeite adulterado",
+            source_name="Agência Brasil",
+            url="https://agenciabrasil.ebc.com.br/saude",
+            rating=None,
+            is_fact_check=False,
+        )
+    ]
+    v_conf, conf_conf, reasons_conf = analyzer.evaluate_verdict(ev_confirm)
+    assert v_conf == Verdict.VERDADEIRO
+    assert conf_conf >= 0.78
+
+
+def test_fact_check_api_empty_evidences():
+    """Garante retorno neutro e inconclusivo na ausência de matérias ou checagens."""
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+
+    analyzer = FactCheckApiAnalyzer()
+    verdict, conf, reasons = analyzer.evaluate_verdict([])
+    assert verdict == Verdict.INCONCLUSIVO
+    assert conf == 0.50
+    assert len(reasons) >= 1
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_offline_fallback():
+    """Valida comportamento defensivo do LLM Judge quando o provedor estiver offline."""
+    from app.analyzers.llm_judge import LlmJudgeAnalyzer
+
+    judge = LlmJudgeAnalyzer()
+    res = await judge.analyze("Alegação de teste para fallback", [])
+
+    assert isinstance(res, AnalyzerResult)
+    assert res.analyzer_name == "llm_judge"
+    assert res.verdict == Verdict.INCONCLUSIVO
+    assert res.confidence == 0.50
+    assert "offline" in res.summary.lower() or "ollama" in res.summary.lower()
+
+
+
 
 
