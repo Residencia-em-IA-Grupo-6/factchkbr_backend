@@ -215,3 +215,81 @@ async def test_orchestrator_claim_propagation():
     assert "BOMBA" not in response.claim
 
 
+@pytest.mark.asyncio
+async def test_claim_extraction_contract_schema():
+    """Valida o cumprimento estrito do contrato Pydantic (Camada 1)."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    from app.schemas.claim_extraction import ClaimExtractionContract, VerificationSourceType
+    extractor = ClaimExtractorAnalyzer()
+
+    text = "A Anvisa determinou a suspensão do lote de azeite adulterado em São Paulo."
+    contract = await extractor.extract_contract(text)
+
+    assert isinstance(contract, ClaimExtractionContract)
+    assert len(contract.assertions) >= 1
+    assertion = contract.assertions[0]
+    assert assertion.triple.subject != ""
+    assert assertion.triple.predicate != ""
+    assert assertion.triple.object != ""
+    assert VerificationSourceType.AGENCIA_REGULADORA in assertion.suggested_source_types
+
+
+@pytest.mark.asyncio
+async def test_claim_decomposer_atomic_and_triples():
+    """Valida a decomposição de períodos compostos em proposições atômicas e triplas (Camada 3)."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    compound_text = (
+        "O Ministério da Saúde cancelou a compra dos remédios "
+        "porque o laboratório farmacêutico fraudou os testes clínicos."
+    )
+
+    contract = await extractor.extract_contract(compound_text)
+    assert len(contract.assertions) == 2
+    # Proposição 1
+    assert "Ministério da Saúde" in contract.assertions[0].statement
+    # Proposição 2
+    assert "laboratório farmacêutico fraudou" in contract.assertions[1].statement
+
+
+def test_spacy_cleaner_and_ner():
+    """Valida a camada de limpeza e NER (Camada 2)."""
+    from app.analyzers.claim_extractor import SpacyNERCleaner
+    cleaner = SpacyNERCleaner()
+
+    raw = "🚨🚨 BOMBA!! URGENTE: O ministro Alexandre de Moraes e o STF suspenderam a rede social no Brasil???"
+    cleaned = cleaner.clean_text(raw)
+
+    assert "🚨" not in cleaned
+    assert "BOMBA" not in cleaned
+    assert "???" not in cleaned
+
+    entities = cleaner.extract_entities(cleaned)
+    assert "ORG" in entities
+    assert "STF" in entities["ORG"]
+    assert "LOC" in entities
+    assert "Brasil" in entities["LOC"]
+
+
+@pytest.mark.asyncio
+async def test_claim_extractor_medical_action_rumor():
+    """Valida extração de alegações médicas e biológicas no presente do indicativo."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    text = "Médico extrai vermes do coração de uma pessoa que come carne de porco"
+    result = await extractor.analyze(text, [])
+
+    assert result.claim is not None
+    assert "extrai vermes" in result.claim
+    assert "PER" in result.raw_details["entities"]
+    assert "Médico" in result.raw_details["entities"]["PER"]
+    assert len(result.raw_details["assertions"]) >= 1
+    triple = result.raw_details["assertions"][0]["triple"]
+    assert triple["subject"] == "Médico"
+    assert triple["predicate"] == "extrai"
+
+
+
+

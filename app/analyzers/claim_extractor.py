@@ -1,18 +1,36 @@
+import asyncio
+import json
 import logging
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
+# Permite execução direta via `python app/analyzers/claim_extractor.py`
+_project_root = str(Path(__file__).resolve().parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+import httpx
+
+from app.config import get_settings
 from app.core.base import BaseAnalyzer
 from app.core.registry import register_analyzer
 from app.schemas.analysis import AnalyzerResult
+from app.schemas.claim_extraction import (
+    AtomicAssertion,
+    ClaimExtractionContract,
+    KnowledgeTriple,
+    VerificationSourceType,
+)
 
 logger = logging.getLogger("factchkbr.analyzers.claim_extractor")
 
 # ==============================================================================
-# MOTOR MORFOLÓGICO ADAPTATIVO (REGRAS DE CONJUGAÇÃO E SINTAXE EM PORTUGUÊS)
+# MOTOR MORFOLÓGICO E SINTÁTICO ADAPTATIVO (PORTUGUÊS)
 # ==============================================================================
 
-# 1. Voz Passiva Analítica: auxiliar + particípio regular (-ado, -ido) ou irregular
+# Voz Passiva Analítica: auxiliar + particípio
 PASSIVE_VOICE_PATTERN = re.compile(
     r"\b(?:foi|foram|é|são|será|serão|está sendo|estão sendo|acaba de ser|acabou de ser)\s+"
     r"(?:[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+(?:ado|ada|ados|adas|ido|ida|idos|idas)|"
@@ -23,7 +41,7 @@ PASSIVE_VOICE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# 2. Locuções Verbais de Ação: auxiliar no indicativo + gerúndio (-ando, -endo, -indo) ou infinitivo
+# Locuções Verbais de Ação
 VERBAL_PERIPHRASIS_PATTERN = re.compile(
     r"\b(?:está|estão|estava|estavam|vem|vêm|vinha|vinham|começou a|começaram a|acabou de|acabaram de|"
     r"tentou|tentaram|pretende|pretendem|decidiu|decidiram|vai|vão|podem?)\s+"
@@ -31,32 +49,31 @@ VERBAL_PERIPHRASIS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# 3. Sufixos Morfológicos de Pretérito Perfeito Regular (3ª pessoa sing. e plural)
-# Cobre qualquer verbo regular das 3 conjugações (-ar: -ou/-aram; -er: -eu/-eram; -ir: -iu/-iram)
+# Sufixos de Pretérito Perfeito (-ou, -aram, -eu, -eram, -iu, -iram)
 PAST_INDICATIVE_SUFFIXES = re.compile(
     r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ou|aram|eu|eram|iu|iram)\b",
     re.IGNORECASE,
 )
 
-# 4. Sufixos Morfológicos de Pretérito Imperfeito Regular (-ava/-avam, -ia/-iam)
+# Sufixos de Pretérito Imperfeito (-ava, -avam, -ia, -iam)
 IMPERFECT_INDICATIVE_SUFFIXES = re.compile(
     r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ava|avam|ia|iam)\b",
     re.IGNORECASE,
 )
 
-# 5. Sufixos Morfológicos de Futuro do Presente (-ará, -arão, -erá, -erão, -irá, -irão)
+# Sufixos de Futuro do Presente (-ará, -arão, -erá, -erão, -irá, -irão)
 FUTURE_INDICATIVE_SUFFIXES = re.compile(
     r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:ará|arão|erá|erão|irá|irão)\b",
     re.IGNORECASE,
 )
 
-# 6. Sufixos Morfológicos de Futuro do Pretérito / Condicional (-aria, -ariam, etc.)
+# Sufixos de Condicional (-aria, -ariam)
 CONDITIONAL_INDICATIVE_SUFFIXES = re.compile(
     r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}(?:aria|ariam|eria|eriam|iria|iriam)\b",
     re.IGNORECASE,
 )
 
-# 7. Verbos Irregulares de Alta Frequência no Pretérito do Indicativo
+# Verbos Irregulares de Alta Frequência
 PAST_IRREGULAR_VERBS = re.compile(
     r"\b(?:disse|disseram|teve|tiveram|esteve|estiveram|fez|fizeram|deu|deram|"
     r"pôs|puseram|trouxe|trouxeram|veio|vieram|viu|viram|ouviu|ouviram|"
@@ -64,283 +81,511 @@ PAST_IRREGULAR_VERBS = re.compile(
     re.IGNORECASE,
 )
 
-# 8. Verbos Declarativos de Ação / Causalidade no Presente do Indicativo
+# Verbos de Ação / Causalidade / Fatos no Presente do Indicativo
 PRESENT_DECLARATIVE_VERBS = re.compile(
-    r"\b(?:mata|matam|altera|alteram|causa|causam|provoca|provocam|gera|geram|"
-    r"cura|curam|destr[oó]i|destroem|infecta|infectam|contamina|contaminam|"
+    r"\b(?:"
+    # Ações biológicas, médicas, cirúrgicas, consumo e saúde
+    r"extrai|extraem|come|comem|consome|consomem|bebe|bebem|ingere|ingerem|"
+    r"retira|retiram|remove|removem|opera|operam|injeta|injetam|aplica|aplicam|"
+    r"toma|tomam|usa|usam|engole|engolem|vomita|vomitam|infecta|infectam|"
+    r"contamina|contaminam|transmite|transmitem|atinge|atingem|afeta|afetam|"
+    r"cura|curam|mata|matam|morre|morrem|falece|falecem|sofre|sofrem|"
+    r"encontra|encontram|descobre|descobrem|mostra|mostram|grava|gravam|"
+    r"filma|filmam|flagra|flagram|"
+    # Verbos terminados em -air (3ª pessoa singular e plural)
+    r"contrai|contraem|atrai|atraem|distrai|distraem|subtrai|subtraem|sai|saem|cai|caem|"
+    # Irregulares de ação e causação no presente
+    r"faz|fazem|diz|dizem|traz|trazem|vai|vão|vem|vêm|vê|veem|ouve|ouvem|"
+    r"quer|querem|pode|podem|sabe|sabem|tem|têm|é|são|está|estão|dá|dão|põe|põem|"
+    # Políticos, institucionais, econômicos e declarativos
+    r"altera|alteram|causa|causam|provoca|provocam|gera|geram|destr[oó]i|destroem|"
     r"afirma|afirmam|declara|declaram|revela|revelam|confirma|confirmam|"
     r"esconde|escondem|publica|publicam|pro[ií]be|pro[ií]bem|autoriza|autorizam|"
     r"aprova|aprovam|cancela|cancelam|aumenta|aumentam|reduz|reduzem|"
-    r"cobra|cobram|compra|compram|vende|vendem|tem|têm|é|são|está|estão)\b",
+    r"cobra|cobram|compra|compram|vende|vendem"
+    r")\b",
     re.IGNORECASE,
 )
 
-# Substantivos e palavras comuns que terminam com sufixos verbais (falsos positivos morfológicos)
+# Substantivos que coincidem com sufixos verbais
 NON_VERB_SUFFIX_EXCLUSIONS = {
-    # -eu / -ou
     "museu", "troféu", "judeu", "breu", "plebeu", "céu", "meu", "seu", "teu",
-    "ouro", "touro", "louro", "besouro", "show",
-    # -iu / -il
-    "fuzil", "barril", "gentil", "abril",
-    # -ava / -ia
+    "ouro", "touro", "louro", "besouro", "show", "fuzil", "barril", "gentil", "abril",
     "trava", "brava", "escrava", "oitava", "dia", "guia", "bacia", "magia", "copia",
-    "padaria", "farmácia", "drogaria", "delegacia",
-    # -ará
+    "padaria", "farmácia", "drogaria", "delegacia", "mídia", "notícia", "família",
+    "polícia", "estratégia", "maioria", "minoria", "energia", "pandemia", "indústria",
     "maracujá", "guaraná", "pará", "alvará", "carajá", "tamanduá", "jacarandá",
 }
 
-# ==============================================================================
-# PADRÕES DE RUÍDO, APELOS À AÇÃO E SUBJETIVIDADE
-# ==============================================================================
-
+# Padrões de ruídos sensacionalistas, emojis e apelos à ação
 NOISE_PATTERNS = re.compile(
     r"\b(?:"
-    # Imperativos de compartilhamento / chamadas
     r"compartilhe[ms]?|repass[ae][ms]?|divulgu?e[ms]?|espalh[ae][ms]?|viraliz[ae][ms]?|"
     r"veja[ms]? antes que apaguem|veja[ms]?|olh[ae][ms]?|assist[ae][ms]?|acord[ae][ms]?|salv[ae][ms]?|"
     r"não deixe[ms]? de (?:repassar|compartilhar)|mande[ms]? para todos|leia[ms]?|"
     r"cliqu[ae][ms]?|acess[ae][ms]?|"
-    # Saudações e interjeições conversacionais
+    r"(?:a\s+)?(?:grande\s+|tradicional\s+)?m[ií]dia\s+(?:n[aã]o\s+vai\s+(?:mostrar|noticiar|passar|falar)|esconde|n[aã]o\s+mostra|cala|abafa)|"
+    r"n[aã]o\s+passa\s+na\s+tv|a\s+tv\s+n[aã]o\s+mostra|a\s+globo\s+n[aã]o\s+mostra|"
     r"bom dia|boa tarde|boa noite|ol[aá] pessoal|ol[aá] a todos|paz do senhor|"
     r"gra[cç]as a deus|am[eé]m|fwd|encaminhad[ao]|"
-    # Julgamentos e desabafos puramente opinativos
     r"que vergonha|que absurdo|inaceit[aá]vel|inacredit[aá]vel|isso é uma vergonha|"
     r"isso é um absurdo|parabéns aos envolvidos|deus nos livre|deus nos acuda|"
     r"vamos orar|temos que orar|oremos|lament[aá]vel|vergonhoso|"
-    # Rótulos sensacionalistas isolados
     r"urgente|bomba|alerta|aten[cç][aã]o|cuidado|"
-    # Perguntas retóricas / indutivas
     r"voc[eê] sabia|voc[eê]s sabiam|at[eé] quando|o que acham|ser[aá] verdade|ser[aá] que"
     r")\b",
     re.IGNORECASE,
 )
 
-# Entidades institucionais, científicas ou políticas frequentes em fact-checking
-CORE_ENTITIES = re.compile(
+CORE_ORGANIZATIONS = re.compile(
     r"\b(?:"
-    r"stf|tse|stj|sus|anvisa|fiocruz|oms|minist[eé]rio|governo|presidente|"
-    r"senado|c[aâ]mara|pol[ií]cia|pf|prf|vacina[s]?|v[ií]rus|medicamento[s]?|"
-    r"rem[eé]dio[s]?|covid|c[aâ]ncer|dna|rna|urna[s]?|elei[cç][aã]o|elei[cç][oõ]es|"
-    r"ministro[s]?|governador[es]?|deputado[s]?|senador[es]?|m[eé]dico[s]?|"
-    r"pesquisa|estudo|hospital|banco central|receita federal|inss|ibge"
+    r"stf|tse|stj|sus|anvisa|fiocruz|oms|minist[eé]rio(?:\s+da\s+[a-zA-Záéíóúâêîôûãõç]+)?|governo(?:\s+federal)?|"
+    r"senado|c[aâ]mara|pol[ií]cia(?:\s+federal|\s+rodovi[aá]ria)?|pf|prf|"
+    r"hospital|banco central|receita federal|inss|ibge|petrobras"
+    r")\b",
+    re.IGNORECASE,
+)
+
+CORE_ROLES_OR_PERSONS = re.compile(
+    r"\b(?:"
+    r"m[eé]dico[s]?|m[eé]dica[s]?|doutor[es]?|doutora[s]?|cirurgi[aã]o[s]?|cirurgi[aã][s]?|"
+    r"cientista[s]?|pesquisador[es]?|especialista[s]?|"
+    r"ministro[s]?|presidente[s]?|governador[es]?|deputado[s]?|senador[es]?|juiz[es]?|ju[ií]za[s]?"
     r")\b",
     re.IGNORECASE,
 )
 
 
+
+# ==============================================================================
+# CAMADA 2: LIMPEZA & NER (spaCy com Fallback Inteligente)
+# ==============================================================================
+
+class SpacyNERCleaner:
+    """
+    Camada 2: Limpeza, desruidificação e Reconhecimento de Entidades Nomeadas (NER).
+    - Remove caracteres de alarme (emojis de sirene, pânico, repasse).
+    - Suprime pontuações redundantes.
+    - Reconhece entidades (PER, ORG, LOC) via spaCy (pt_core_news) ou fallback integrado.
+    """
+
+    def __init__(self) -> None:
+        self.nlp = None
+        try:
+            import spacy
+            for model_name in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
+                try:
+                    self.nlp = spacy.load(model_name)
+                    logger.info("Modelo spaCy '%s' inicializado com sucesso.", model_name)
+                    break
+                except Exception:
+                    continue
+        except ImportError:
+            self.nlp = None
+
+    def clean_text(self, text: str) -> str:
+        """Remove emojis de alarme, pontuações de pânico e decanta alertas sensacionalistas."""
+        # 1. Remove emojis alarmistas e caracteres especiais de mensageria
+        t = re.sub(r"[🚨⚠️💣🔥🛑📢👀⚡🇧🇷❌‼️⁉️]", " ", text)
+
+        # 2. Normaliza pontuações repetidas (ex: '???' -> '?', '!!!' -> '.')
+        t = re.sub(r"\?{2,}", "?", t)
+        t = re.sub(r"!{2,}", ".", t)
+        t = re.sub(r"\.{2,}", ".", t)
+
+        # 3. Normaliza espaços antes de decapar cabeçalhos
+        t = re.sub(r"\s+", " ", t).strip()
+
+        # 4. Remove cabeçalhos de alarme isolados no início (suporta múltiplos encadeados)
+        t = re.sub(
+            r"^(?:(?:URGENTE|BOMBA|ALERTA|ATENÇÃO BRASIL)[!.:\s-]*)+",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # 5. Remove pontuação órfã no início
+        t = re.sub(r"^[\s,;.:-]+", "", t).strip()
+        return t
+
+
+    def extract_entities(self, text: str) -> dict[str, list[str]]:
+        """Identifica entidades nomeadas categorizadas (PER, ORG, LOC)."""
+        entities: dict[str, list[str]] = {"PER": [], "ORG": [], "LOC": []}
+
+        # Modo 1: spaCy instalado e modelo disponível
+        if self.nlp is not None:
+            try:
+                doc = self.nlp(text)
+                for ent in doc.ents:
+                    label = ent.label_
+                    val = ent.text.strip()
+                    if label in entities and val not in entities[label]:
+                        entities[label].append(val)
+                return entities
+            except Exception as e:
+                logger.warning("Falha na inferência do spaCy, aplicando fallback: %s", e)
+
+        # Modo 2: Fallback determinístico baseado em entidades estruturais e sintagmas
+        # ORGs institucionais
+        for m in CORE_ORGANIZATIONS.finditer(text):
+            val = m.group(0).strip()
+            org_norm = val.upper() if len(val) <= 4 else val.title()
+            if org_norm not in entities["ORG"]:
+                entities["ORG"].append(org_norm)
+
+        # PER (Papéis de destaque: médicos, cientistas, autoridades, ministros)
+        for m in CORE_ROLES_OR_PERSONS.finditer(text):
+            val = m.group(0).strip().title()
+            if val not in entities["PER"]:
+                entities["PER"].append(val)
+
+        # PER (Pessoas públicas / nomes próprios com maiúsculas compostas)
+        per_pattern = re.compile(
+            r"\b(?:[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+(?:\s+(?:de|da|do|dos|das|e))?\s+[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+)\b"
+        )
+        for m in per_pattern.finditer(text):
+            candidate = m.group(0).strip()
+            # Ignora se for parte de entidade institucional
+            if not CORE_ORGANIZATIONS.search(candidate) and candidate not in entities["PER"]:
+                entities["PER"].append(candidate)
+
+
+        # LOC (Cidades, estados, países comuns em contexto de desinformação)
+        loc_pattern = re.compile(
+            r"\b(?:Brasil|Brasília|São Paulo|Rio de Janeiro|Minas Gerais|Bahia|Paraná|DF|SP|RJ|MG|China|EUA|Rússia)\b",
+            re.IGNORECASE,
+        )
+        for m in loc_pattern.finditer(text):
+            candidate = m.group(0).strip().title()
+            if candidate not in entities["LOC"]:
+                entities["LOC"].append(candidate)
+
+        return entities
+
+
+# ==============================================================================
+# CAMADA 3: DECOMPOSIÇÃO (LLM com Instructor/Structured Outputs + Fallback Sintático)
+# ==============================================================================
+
+class ClaimDecomposer:
+    """
+    Camada 3: Decomposição Atômica e Extração de Triplas Semânticas.
+    Normaliza coloquialismos e quebra períodos compostos em proposições atômicas
+    independentes, extraindo a tripla (SPO) e fontes de verificação sugeridas.
+    """
+
+    def __init__(self) -> None:
+        self.settings = get_settings()
+
+    def _infer_source_types(self, text: str, entities: dict[str, list[str]]) -> list[VerificationSourceType]:
+        """Infere os tipos de fontes oficiais mais adequados para averiguação da asserção."""
+        sources: list[VerificationSourceType] = []
+        lower = text.lower()
+        orgs = [o.lower() for o in entities.get("ORG", [])]
+
+        # Agências reguladoras, saúde pública e institutos de pesquisa
+        if any(w in lower for w in ("anvisa", "vacina", "medicamento", "remédio", "remédios", "saúde", "dengue", "vírus", "azeite", "lote", "médico", "coração", "vermes", "carne", "doença", "hospital")) or any("anvisa" in o for o in orgs):
+            sources.append(VerificationSourceType.INSTITUTO_PESQUISA)
+            sources.append(VerificationSourceType.AGENCIA_REGULADORA)
+            sources.append(VerificationSourceType.ORGAO_OFICIAL)
+
+
+        # Poder judiciário e polícia
+        if any(w in lower for w in ("stf", "tse", "stj", "polícia", "pf", "preso", "prisão", "ministro", "juiz", "tribunal", "urna", "eleição")) or any(o in ("stf", "tse", "pf") for o in orgs):
+            sources.append(VerificationSourceType.PODER_JUDICIARIO)
+            sources.append(VerificationSourceType.ORGAO_OFICIAL)
+
+        # Dados públicos, economia e institutos
+        if any(w in lower for w in ("petrobras", "combustível", "gasolina", "diesel", "imposto", "receita federal", "inss", "governo", "ibge")):
+            sources.append(VerificationSourceType.DADOS_PUBLICOS)
+            sources.append(VerificationSourceType.ORGAO_OFICIAL)
+
+        if not sources:
+            sources = [VerificationSourceType.ORGAO_OFICIAL, VerificationSourceType.AGENCIA_CHECAGEM]
+
+        return list(dict.fromkeys(sources))
+
+    def _extract_triple_from_sentence(self, sentence: str, entities: dict[str, list[str]]) -> KnowledgeTriple:
+        """Extrai deterministicamente a tripla de conhecimento (sujeito, predicado, objeto)."""
+        clean_s = sentence.strip().rstrip(".?!")
+
+        # 1. Procura primeiro entidades identificadas como sujeito
+        subject = "Fato Noticiado"
+        all_ents = entities.get("ORG", []) + entities.get("PER", [])
+        for ent in all_ents:
+            if ent.lower() in clean_s.lower():
+                # Encontra a posição exata
+                idx = clean_s.lower().find(ent.lower())
+                subject = clean_s[idx : idx + len(ent)]
+                break
+
+        # Se não achou em entidades, busca sintagma nominal inicial
+        if subject == "Fato Noticiado":
+            np_match = re.match(
+                r"^(?:O|A|Os|As|Um|Uma)?\s*([a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+(?:\s+[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+){0,3})\b",
+                clean_s,
+            )
+            if np_match:
+                subject = np_match.group(0).strip()
+
+        # 2. Localiza o verbo central da oração
+        predicate = "afirmação sobre"
+        verb_candidates = (
+            list(PASSIVE_VOICE_PATTERN.finditer(clean_s)) +
+            list(VERBAL_PERIPHRASIS_PATTERN.finditer(clean_s)) +
+            list(PAST_INDICATIVE_SUFFIXES.finditer(clean_s)) +
+            list(FUTURE_INDICATIVE_SUFFIXES.finditer(clean_s)) +
+            list(PRESENT_DECLARATIVE_VERBS.finditer(clean_s)) +
+            list(PAST_IRREGULAR_VERBS.finditer(clean_s))
+        )
+
+        valid_verbs = [m for m in verb_candidates if m.group(0).lower() not in NON_VERB_SUFFIX_EXCLUSIONS]
+        if valid_verbs:
+            first_verb = sorted(valid_verbs, key=lambda m: m.start())[0]
+            v_start = first_verb.start()
+            v_end = first_verb.end()
+            predicate = clean_s[v_start:v_end].strip()
+
+            # Objeto é o complemento após o predicado verbal
+            after_verb = clean_s[v_end:].strip()
+            obj = after_verb if len(after_verb) > 2 else "ocorrência descrita"
+        else:
+            obj = clean_s
+
+        return KnowledgeTriple(
+            subject=subject,
+            predicate=predicate,
+            object=obj,
+        )
+
+    async def decompose_via_llm(
+        self,
+        cleaned_text: str,
+        entities: dict[str, list[str]],
+    ) -> list[AtomicAssertion] | None:
+        """
+        Decompõe períodos compostos em proposições atômicas independentes via LLM.
+        Garante tipagem rigorosa conforme o schema Pydantic.
+        """
+        provider = self.settings.LLM_PROVIDER
+        endpoint = self.settings.get_llm_endpoint()
+        model = self.settings.get_llm_model()
+        headers = self.settings.get_llm_headers()
+
+        # Se for OpenAI mas não houver chave configurada, pula para o fallback
+        if provider.lower() == "openai" and not self.settings.OPENAI_API_KEY:
+            return None
+
+        prompt = (
+            "Você é um especialista em jornalismo investigativo e Fact-Checking.\n"
+            "Sua tarefa é processar o texto e decompor qualquer período composto em proposições atômicas INDEPENDENTES.\n"
+            "Cada proposição atômica deve ser um fato único verificável, sem opiniões, sem apelos e em linguagem denotativa neutra.\n"
+            "Para cada proposição, extraia a tripla semântica (sujeito, predicado, objeto) e indique as fontes de verificação esperadas.\n\n"
+            f"Texto: \"{cleaned_text}\"\n"
+            f"Entidades pré-detectadas: {json.dumps(entities, ensure_ascii=False)}"
+        )
+
+        system_instruction = (
+            "Retorne rigorosamente apenas um JSON com a chave 'assertions', que é uma lista de objetos contendo:\n"
+            "- id: inteiro (1, 2, ...)\n"
+            "- statement: string (fato atômico normalizado em ordem direta)\n"
+            "- triple: objeto com subject (string), predicate (string), object (string)\n"
+            "- suggested_source_types: lista com valores válidos: ['ORGAO_OFICIAL', 'AGENCIA_REGULADORA', 'PODER_JUDICIARIO', 'INSTITUTO_PESQUISA', 'AGENCIA_CHECAGEM', 'DADOS_PUBLICOS']\n"
+            "- is_check_worthy: boolean (true se for fato concreto)"
+        )
+
+        # Timeout ajustado para modelos locais (ex: 9b rodando no Ollama)
+        timeout_seconds = 20.0 if provider.lower() == "ollama" else 10.0
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                resp = await client.post(
+                    endpoint,
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.1,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    parsed = json.loads(content)
+                    raw_assertions = parsed.get("assertions", [])
+                    assertions: list[AtomicAssertion] = []
+                    for idx, a in enumerate(raw_assertions, 1):
+                        assertions.append(AtomicAssertion.model_validate(a))
+                    return assertions
+                else:
+                    logger.debug(
+                        "LLM (%s: %s) retornou status %s: %s. Utilizando fallback sintático.",
+                        provider,
+                        model,
+                        resp.status_code,
+                        resp.text,
+                    )
+        except Exception as e:
+            logger.debug(
+                "LLM (%s: %s) em %s não respondeu (%s). Utilizando fallback sintático.",
+                provider,
+                model,
+                endpoint,
+                e,
+            )
+
+        return None
+
+
+    def decompose_syntactic(
+        self,
+        cleaned_text: str,
+        entities: dict[str, list[str]],
+    ) -> tuple[list[AtomicAssertion], list[str]]:
+        """
+        Decomposição sintática e morfológica determinística (fallback autossuficiente).
+        Desmembra orações coordenadas/subordinadas e filtra fragmentos ruidosos.
+        """
+        # 1. Segmentação inicial de sentenças
+        raw_sentences = [
+            s.strip() for s in re.split(r"[.!?\n]+", cleaned_text) if s.strip()
+        ]
+
+        atomic_candidates: list[str] = []
+        discarded: list[str] = []
+
+        # 2. Decomposição de períodos compostos em orações atômicas
+        # Conectivos explicativos, causais e adversativos: porque, pois, e que, mas, já que, visto que
+        clause_splitter = re.compile(
+            r"\b(?:porque|por que|já que|visto que|pois|mas|porém|contudo|todavia|enquanto|e que)\b",
+            re.IGNORECASE,
+        )
+
+        for sent in raw_sentences:
+            # Verifica se a frase inteira é ruído puro
+            if NOISE_PATTERNS.search(sent) and (len(sent.split()) <= 6 or "mídia" in sent.lower() or "tv" in sent.lower()):
+                discarded.append(sent)
+                continue
+
+            sub_clauses = [c.strip() for c in clause_splitter.split(sent) if c.strip()]
+            for clause in sub_clauses:
+                # Decapita imperativos residuais
+                cleaned_clause = re.sub(
+                    r"^(?:veja|olhe|compartilhe|repassem|atenção|urgente|bomba)[!:\s,-]*",
+                    "",
+                    clause,
+                    flags=re.IGNORECASE,
+                ).strip()
+
+                if not cleaned_clause:
+                    continue
+
+                if NOISE_PATTERNS.search(cleaned_clause):
+                    discarded.append(cleaned_clause)
+                    continue
+
+
+                # Checa se possui verbo finito
+                has_verb = (
+                    PASSIVE_VOICE_PATTERN.search(cleaned_clause) is not None or
+                    VERBAL_PERIPHRASIS_PATTERN.search(cleaned_clause) is not None or
+                    PAST_INDICATIVE_SUFFIXES.search(cleaned_clause) is not None or
+                    FUTURE_INDICATIVE_SUFFIXES.search(cleaned_clause) is not None or
+                    PRESENT_DECLARATIVE_VERBS.search(cleaned_clause) is not None or
+                    PAST_IRREGULAR_VERBS.search(cleaned_clause) is not None
+                )
+
+                if has_verb and len(cleaned_clause.split()) >= 3:
+                    atomic_candidates.append(cleaned_clause)
+                else:
+                    discarded.append(cleaned_clause)
+
+        # 3. Monta as asserções atômicas com suas triplas e fontes sugeridas
+        assertions: list[AtomicAssertion] = []
+        for idx, statement in enumerate(atomic_candidates, 1):
+            triple = self._extract_triple_from_sentence(statement, entities)
+            source_types = self._infer_source_types(statement, entities)
+            assertions.append(
+                AtomicAssertion(
+                    id=idx,
+                    statement=statement,
+                    triple=triple,
+                    suggested_source_types=source_types,
+                    is_check_worthy=True,
+                )
+            )
+
+        return assertions, discarded
+
+
+# ==============================================================================
+# PIPELINE INTEGRADO: ANALISADOR 4 (BaseAnalyzer)
+# ==============================================================================
+
 @register_analyzer("claim_extractor", weight=0.0)
 class ClaimExtractorAnalyzer(BaseAnalyzer):
     """
-    Analisador 4: Extrator Adaptativo de Alegações (Claim Extraction / Check-worthiness).
+    Analisador 4: Extrator e Decompositor de Alegações (3 Camadas).
 
-    Opera de forma universal e adaptativa através de um motor morfológico da língua portuguesa:
-    - Reconhece qualquer verbo do português em modo indicativo por sufixos de conjugação
-      (passado, presente, futuro, voz passiva e locuções verbais de ação).
-    - Detecta sintagmas nominais sujeitos e entidades envolvidas.
-    - Filtra ruídos conversacionais (saudações, imperativos de compartilhamento, opiniões).
-
-    NÃO emite veredito de veracidade (verdict=None, confidence=0.0). Atua no estágio inicial
-    do pipeline para isolar a alegação factual checável ('claim') para o orquestrador.
+    1. Camada de Contrato (Pydantic): Retorno estrito tipado (ClaimExtractionContract).
+    2. Camada de Limpeza & NER (spaCy): Higienização de alarmes e extração de PER, ORG, LOC.
+    3. Camada de Decomposição (LLM/Sintática): Proposições atômicas, triplas e fontes sugeridas.
     """
 
-    def clean_text(self, text: str) -> str:
-        """Remove formatações de markdown e caracteres decorativos da mensagem."""
-        cleaned = re.sub(r"[\*_~`#]", " ", text)
-        cleaned = re.sub(r"\s+", " ", cleaned)
-        return cleaned.strip()
+    def __init__(self) -> None:
+        self.cleaner = SpacyNERCleaner()
+        self.decomposer = ClaimDecomposer()
 
-    def segment_sentences(self, text: str) -> list[str]:
-        """Divide o texto em sentenças candidatas normalizadas."""
-        raw_parts = re.split(r"(?:[.!?…\n\r]+|\s{2,})", text)
-        candidates: list[str] = []
-        for part in raw_parts:
-            cleaned = re.sub(r"^[\W\d_]+|[\W_]+$", "", part).strip()
-            # Descarta fragmentos mínimos (< 5 caracteres ou < 2 palavras)
-            if len(cleaned) >= 5 and len(cleaned.split()) >= 2:
-                candidates.append(cleaned)
-        return candidates
-
-    def detect_verbs(self, sentence: str) -> list[str]:
+    async def extract_contract(self, text: str) -> ClaimExtractionContract:
         """
-        Detecta verbos finitos e construções verbais de forma universal por morfologia.
-        Agnóstico a listas fixas: identifica qualquer verbo novo do português.
+        Executa o pipeline completo de 3 camadas e gera o contrato estrito Pydantic.
         """
-        detected: list[str] = []
+        # Camada 2: Limpeza e Reconhecimento de Entidades
+        cleaned = self.cleaner.clean_text(text)
+        entities = self.cleaner.extract_entities(cleaned)
 
-        # 1. Voz passiva analítica (ex: 'foi aprovado', 'foram presos', 'está sendo investigado')
-        for m in PASSIVE_VOICE_PATTERN.finditer(sentence):
-            detected.append(m.group(0))
+        # Camada 3: Decomposição Atômica e Extração de Triplas
+        assertions = await self.decomposer.decompose_via_llm(cleaned, entities)
+        discarded: list[str] = []
+        engine_used: str = f"llm:{self.decomposer.settings.get_llm_model()}"
 
-        # 2. Locuções verbais de ação (ex: 'acabou de suspender', 'está planejando')
-        for m in VERBAL_PERIPHRASIS_PATTERN.finditer(sentence):
-            detected.append(m.group(0))
+        if assertions is None:
+            # Fallback determinístico sintático
+            assertions, discarded = self.decomposer.decompose_syntactic(cleaned, entities)
+            engine_used = "syntactic_fallback"
 
-        # 3. Pretérito Perfeito regular por sufixo (-ou, -aram, -eu, -eram, -iu, -iram)
-        for m in PAST_INDICATIVE_SUFFIXES.finditer(sentence):
-            w = m.group(0)
-            if w.lower() not in NON_VERB_SUFFIX_EXCLUSIONS:
-                detected.append(w)
-
-        # 4. Pretérito Imperfeito regular (-ava, -avam, -ia, -iam)
-        for m in IMPERFECT_INDICATIVE_SUFFIXES.finditer(sentence):
-            w = m.group(0)
-            if w.lower() not in NON_VERB_SUFFIX_EXCLUSIONS:
-                detected.append(w)
-
-        # 5. Futuro do Presente regular (-ará, -arão, -erá, -erão, -irá, -irão)
-        for m in FUTURE_INDICATIVE_SUFFIXES.finditer(sentence):
-            w = m.group(0)
-            if w.lower() not in NON_VERB_SUFFIX_EXCLUSIONS:
-                detected.append(w)
-
-        # 6. Futuro do Pretérito / Condicional (-aria, -ariam, etc.)
-        for m in CONDITIONAL_INDICATIVE_SUFFIXES.finditer(sentence):
-            w = m.group(0)
-            if w.lower() not in NON_VERB_SUFFIX_EXCLUSIONS:
-                detected.append(w)
-
-        # 7. Pretéritos irregulares de alta frequência (disse, fez, teve, etc.)
-        for m in PAST_IRREGULAR_VERBS.finditer(sentence):
-            detected.append(m.group(0))
-
-        # 8. Verbos declarativos frequentes no Presente do Indicativo
-        for m in PRESENT_DECLARATIVE_VERBS.finditer(sentence):
-            detected.append(m.group(0))
-
-        return list(dict.fromkeys(detected))
-
-    def detect_subject_and_entities(self, sentence: str) -> tuple[bool, list[str]]:
-        """
-        Identifica estrutura sintática com sujeito e entidades nominais.
-        """
-        # Sintagma nominal sujeito no início da frase (Artigo/Demonstrativo/Numeral + Substantivo)
-        has_subject_np = bool(
-            re.search(
-                r"^(?:o|a|os|as|um|uma|uns|umas|este|esta|estes|estas|esse|essa|dois|três|quatro|\d+)\s+"
-                r"[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]+",
-                sentence,
-                re.IGNORECASE,
-            )
+        return ClaimExtractionContract(
+            original_text=text,
+            cleaned_text=cleaned,
+            entities=entities,
+            assertions=assertions,
+            discarded_fragments=discarded,
+            engine_used=engine_used,
         )
-
-        entities: list[str] = []
-
-        # Nomes próprios no meio da frase (capitalização indicando entidade ou pessoa)
-        tokens = sentence.split()[1:]  # ignora o primeiro token para evitar maiúscula de abertura
-        for token in tokens:
-            clean_tok = re.sub(r"\W+", "", token)
-            if clean_tok.istitle() and len(clean_tok) >= 3 and clean_tok.lower() not in NON_VERB_SUFFIX_EXCLUSIONS:
-                entities.append(clean_tok)
-
-        # Entidades de órgãos públicos, termos médicos e políticos
-        for m in CORE_ENTITIES.finditer(sentence):
-            entities.append(m.group(0))
-
-        return has_subject_np, list(dict.fromkeys(entities))
-
-    def score_sentence(self, sentence: str) -> tuple[float, bool, dict[str, Any]]:
-        """
-        Calcula o escore adaptativo de factualidade / check-worthiness de uma sentença.
-        """
-        verbs = self.detect_verbs(sentence)
-        has_subject_np, entities = self.detect_subject_and_entities(sentence)
-        noise_matches = NOISE_PATTERNS.findall(sentence)
-
-        n_verbs = len(verbs)
-        n_entities = len(entities)
-        has_noise = len(noise_matches) > 0
-
-        score = 0.0
-
-        # Verbos no indicativo (passado/presente/futuro)
-        if n_verbs > 0:
-            score += 0.40 * min(n_verbs, 2)
-
-        # Bônus para voz passiva analítica ou locuções de ação
-        if PASSIVE_VOICE_PATTERN.search(sentence) or VERBAL_PERIPHRASIS_PATTERN.search(sentence):
-            score += 0.15
-
-        # Estrutura com sintagma nominal sujeito explícito
-        if has_subject_np:
-            score += 0.15
-
-        # Entidades nominais ou nomes próprios identificados
-        if n_entities > 0:
-            score += 0.20 * min(n_entities, 2)
-
-        # Especificadores de dados: números, porcentagens, valores monetários, datas
-        if re.search(r"\b(?:\d+|%|R\$|milhões|bilhões|ontem|hoje|neste ano|em \d{4})\b", sentence, re.IGNORECASE):
-            score += 0.15
-
-        # Penalidade expressiva por ruído (saudações, imperativos de compartilhamento, opiniões)
-        if has_noise:
-            score -= 0.35
-
-        # Critério adaptativo para sentença factual:
-        # Requer verbo finito no indicativo + pontuação mínima
-        is_factual = (score >= 0.35) and (n_verbs > 0)
-
-        meta = {
-            "verbs": verbs,
-            "has_subject_np": has_subject_np,
-            "entities": entities,
-            "noise": noise_matches,
-            "score": round(max(score, 0.0), 4),
-        }
-        return score, is_factual, meta
-
-    def extract_claims(self, text: str) -> list[str]:
-        """Extrai todas as sentenças classificadas com teor factual."""
-        cleaned = self.clean_text(text)
-        sentences = self.segment_sentences(cleaned)
-        claims: list[tuple[float, str]] = []
-
-        for s in sentences:
-            score, is_factual, _ = self.score_sentence(s)
-            if is_factual:
-                claims.append((score, s))
-
-        claims.sort(key=lambda x: x[0], reverse=True)
-        return [c[1] for c in claims]
-
-    def extract_primary_claim(self, text: str) -> str | None:
-        """Retorna a sentença factual com maior pontuação de check-worthiness."""
-        claims = self.extract_claims(text)
-        return claims[0] if claims else None
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:
         """
-        Executa a extração adaptativa de alegações factuais e isolamento de ruído.
-        NÃO emite veredito (verdict=None) nem confiança (confidence=0.0).
+        Integração com o pipeline de orquestração do FactChkBR.
+        Retorna a alegação factual principal e disponibiliza o contrato completo em raw_details.
         """
-        cleaned = self.clean_text(text)
-        sentences = self.segment_sentences(cleaned)
+        contract = await self.extract_contract(text)
 
-        factual_claims: list[tuple[float, str]] = []
-        discarded_sentences: list[dict[str, Any]] = []
+        primary_assertion = contract.assertions[0] if contract.assertions else None
+        primary_claim = primary_assertion.statement if primary_assertion else None
 
-        for s in sentences:
-            score, is_factual, meta = self.score_sentence(s)
-            if is_factual:
-                factual_claims.append((score, s))
-            else:
-                discarded_sentences.append({
-                    "sentence": s,
-                    "reason": "ruído/conversacional" if meta["noise"] else "baixo teor factual",
-                    "score": meta["score"],
-                })
-
-        factual_claims.sort(key=lambda x: x[0], reverse=True)
-        extracted_claims = [c[1] for c in factual_claims]
-        primary_claim = extracted_claims[0] if extracted_claims else None
-        best_score = factual_claims[0][0] if factual_claims else 0.0
+        extracted_claims = [a.statement for a in contract.assertions]
 
         reasons: list[str] = []
         if primary_claim:
             reasons.append(f"Alegação factual isolada: \"{primary_claim}\"")
-            if discarded_sentences:
+            if contract.discarded_fragments:
                 reasons.append(
-                    f"Filtrados {len(discarded_sentences)} fragmento(s) de ruído, saudações ou apelos de compartilhamento."
+                    f"Filtrados {len(contract.discarded_fragments)} fragmento(s) de ruído ou apelos à ação."
                 )
         else:
             reasons.append(
@@ -348,9 +593,9 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
             )
 
         summary = (
-            f"Extração concluída: {len(extracted_claims)} sentença(s) com teor factual identificada(s)."
-            if extracted_claims
-            else "Extração concluída: texto sem sentenças factuais claras."
+            f"Extração e decomposição concluída: {len(contract.assertions)} proposição(ões) atômica(s) identificada(s)."
+            if contract.assertions
+            else "Extração concluída: texto sem proposições factuais checáveis."
         )
 
         return AnalyzerResult(
@@ -360,16 +605,124 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
             claim=primary_claim,
             summary=summary,
             reasons=reasons,
-            sources=["Extrator de Alegações FactChkBR (Motor Morfológico Adaptativo)"],
+            sources=["Extrator de Alegações FactChkBR (Contrato Pydantic, spaCy & Decomposição)"],
             raw_details={
+                "contract": contract.model_dump(),
+                "engine_used": contract.engine_used,
                 "extracted_claims": extracted_claims,
                 "extracted_claim": primary_claim or "",
                 "primary_claim": primary_claim,
-                "discarded_sentences": discarded_sentences,
-                "total_sentences": len(sentences),
-                "factual_sentences_count": len(extracted_claims),
-                "claims_found": len(extracted_claims),
-                "check_worthiness_score": round(max(best_score, 0.0), 4),
+                "assertions": [a.model_dump() for a in contract.assertions],
+                "entities": contract.entities,
+                "discarded_sentences": contract.discarded_fragments,
+                "total_sentences": len(contract.assertions) + len(contract.discarded_fragments),
+                "factual_sentences_count": len(contract.assertions),
+                "claims_found": len(contract.assertions),
+                "check_worthiness_score": 1.0 if primary_claim else 0.0,
             },
         )
 
+
+# ==============================================================================
+# FORMATAÇÃO CLI E TESTES RÁPIDOS NO TERMINAL
+# ==============================================================================
+
+def format_cli_result(res: AnalyzerResult) -> None:
+    """Imprime no terminal o resultado da extração formatado amigavelmente com as 3 camadas."""
+    print("\n" + "=" * 75)
+    raw = res.raw_details or {}
+    engine = raw.get("engine_used", "syntactic_fallback")
+    engine_label = f"LLM Local ({engine})" if "llm" in engine else "Motor Algorítmico / Sintático (Fallback Offline)"
+    print(f"⚙️  MOTOR EXECUTOR: {engine_label}")
+
+    if res.claim:
+        print(f"🎯 ALEGAÇÃO PRINCIPAL ISOLADA (CLAIM):\n   👉 \"{res.claim}\"")
+    else:
+        print("⚠️  NENHUMA ALEGAÇÃO FACTUAL IDENTIFICADA (Texto opinativo/saudação/ruído)")
+
+
+    raw = res.raw_details or {}
+    assertions = raw.get("assertions", [])
+
+    if assertions:
+        print(f"\n🧬 PROPOSIÇÕES ATÔMICAS & TRIPLAS (SPO) [{len(assertions)}]:")
+        for a in assertions:
+            triple = a.get("triple", {})
+            sources = a.get("suggested_source_types", [])
+            print(f"   [{a.get('id', 1)}] Statement: \"{a.get('statement', '')}\"")
+            print(f"       ├─ Tripla:  ({triple.get('subject')} ➔ {triple.get('predicate')} ➔ {triple.get('object')})")
+            print(f"       └─ Fontes:  {sources}")
+
+    entities = raw.get("entities", {})
+    if any(entities.values()):
+        print(f"\n🏷️  ENTIDADES IDENTIFICADAS (NER):")
+        for cat, items in entities.items():
+            if items:
+                print(f"   • {cat}: {items}")
+
+    discarded = raw.get("discarded_sentences", [])
+    if discarded:
+        print(f"\n🗑️  FRAGMENTOS/RUÍDOS DESCARTADOS ({len(discarded)}):")
+        for d in discarded:
+            print(f"   ✖ \"{d}\"")
+
+    print(f"\n📊 MÉTRICAS:")
+    print(f"   • Proposições atômicas: {raw.get('factual_sentences_count', 0)}")
+    print(f"   • Fragmentos de ruído:  {len(discarded)}")
+    print("=" * 75 + "\n")
+
+
+if __name__ == "__main__":
+    import asyncio
+    import select
+    import sys
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+    async def _run_cli() -> None:
+        extractor = ClaimExtractorAnalyzer()
+
+        # 1. Se passou o texto como argumento direto:
+        if len(sys.argv) > 1:
+            text = " ".join(sys.argv[1:])
+            print("\n🔍 Processando texto nas 3 camadas (Contrato, NER & Decomposição)...")
+            result = await extractor.analyze(text, [])
+            format_cli_result(result)
+            return
+
+        # 2. Modo Interativo Contínuo
+        print("=" * 75)
+        print("🔎 FactChkBR - Extrator Factual (3 Camadas: Contrato, NER & Decomposição)")
+        print("Cole qualquer mensagem ou notícia abaixo e pressione ENTER.")
+        print("Digite 'sair' ou pressione Ctrl+C para encerrar.")
+        print("=" * 75)
+
+        while True:
+            try:
+                print("📥 Cole o texto a ser analisado:")
+                first_line = input("> ").strip()
+                if not first_line:
+                    continue
+                if first_line.lower() in ("sair", "exit", "quit", "q"):
+                    print("Encerrando testador.")
+                    break
+
+                lines = [first_line]
+                try:
+                    while select.select([sys.stdin], [], [], 0.05)[0]:
+                        extra = sys.stdin.readline()
+                        if not extra:
+                            break
+                        lines.append(extra.strip())
+                except Exception:
+                    pass
+
+                full_text = " ".join(line for line in lines if line)
+                result = await extractor.analyze(full_text, [])
+                format_cli_result(result)
+
+            except (KeyboardInterrupt, EOFError):
+                print("\nSessão encerrada.")
+                break
+
+    asyncio.run(_run_cli())
