@@ -1,4 +1,12 @@
 import asyncio
+import sys
+from pathlib import Path
+
+# Permite execução direta via `python app/core/orchestrator.py`
+_project_root = str(Path(__file__).resolve().parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from app.config import Settings, get_settings
 from app.core.base import BaseAnalyzer
 from app.core.registry import registry
@@ -162,5 +170,98 @@ class FactCheckOrchestrator:
             reasons=list(dict.fromkeys(all_reasons)),
             sources=list(dict.fromkeys(all_sources)),
         )
+
+
+def format_cli_result(res: AnalyzeResponse) -> None:
+    """Imprime relatório estruturado e legível do pipeline no terminal."""
+    v_icons = {
+        Verdict.VERDADEIRO: "✅ VERDADEIRO",
+        Verdict.FAKE: "❌ FAKE",
+        Verdict.SUSPEITO: "⚠️ SUSPEITO",
+        Verdict.INCONCLUSIVO: "❓ INCONCLUSIVO",
+    }
+    verdict_display = v_icons.get(res.verdict, res.verdict.value)
+
+    print("\n" + "=" * 78)
+    print("⚖️  FACTCHKBR - RESULTADO CONSOLIDADO DO PIPELINE")
+    print("=" * 78)
+    print(f"🎯 ALEGAÇÃO ISOLADA (CLAIM):\n   👉 \"{res.claim}\"\n")
+    print(f"⚖️  VEREDITO CONSOLIDADO: {verdict_display}")
+    print(f"📊 GRAU DE CONFIANÇA:    {res.confidence * 100:.1f}%\n")
+    print(f"📝 RESUMO EXPLICATIVO:\n   {res.summary}\n")
+
+    if res.reasons:
+        print(f"🔍 RAZÕES APONTADAS ({len(res.reasons)}):")
+        for r in res.reasons:
+            print(f"   • {r}")
+        print()
+
+    if res.sources:
+        print(f"🌐 FONTES & REFERÊNCIAS ({len(res.sources)}):")
+        for s in res.sources:
+            print(f"   • {s}")
+        print()
+    print("=" * 78 + "\n")
+
+
+if __name__ == "__main__":
+    import select
+    import warnings
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+    async def _run_cli() -> None:
+        orchestrator = FactCheckOrchestrator()
+        active = [a.name for a in orchestrator.get_active_analyzers()]
+
+        print("\n" + "=" * 78)
+        print("🔎 FactChkBR - Pipeline Completo de Checagem de Fatos")
+        print(f"⚙️  Módulos ativos: {' -> '.join(active)}")
+        print("=" * 78)
+
+        # 1. Se passou o texto diretamente como argumento via terminal
+        if len(sys.argv) > 1:
+            raw_text = " ".join(sys.argv[1:])
+            print(f"\n📥 Processando: \"{raw_text}\"")
+            print("⏳ Executando analisadores (Heurística -> Extrator -> Fact-Check API -> LLM Judge)...")
+            res = await orchestrator.analyze(raw_text, [])
+            format_cli_result(res)
+            return
+
+        # 2. Modo interativo contínuo
+        print("\nCole qualquer notícia ou mensagem abaixo e pressione ENTER para analisar.")
+        print("Digite 'sair' ou pressione Ctrl+C para encerrar.\n")
+
+        while True:
+            try:
+                print("📥 Cole o texto a ser analisado:")
+                first_line = input("> ").strip()
+                if not first_line:
+                    continue
+                if first_line.lower() in ("sair", "exit", "quit", "q"):
+                    print("Encerrando testador do FactChkBR.")
+                    break
+
+                lines = [first_line]
+                try:
+                    while select.select([sys.stdin], [], [], 0.05)[0]:
+                        extra = sys.stdin.readline()
+                        if not extra:
+                            break
+                        lines.append(extra.strip())
+                except Exception:
+                    pass
+
+                full_text = " ".join(line for line in lines if line)
+                print("\n⏳ Executando pipeline completo...")
+                res = await orchestrator.analyze(full_text, [])
+                format_cli_result(res)
+
+            except (KeyboardInterrupt, EOFError):
+                print("\nSessão encerrada.")
+                break
+
+    asyncio.run(_run_cli())
+
 
 
