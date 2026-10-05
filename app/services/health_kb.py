@@ -231,7 +231,14 @@ class HealthLocalKB:
             SELECT trade_name, active_principle, regulatory_category, 
                    therapeutic_class, registration_status, company, registration_number
             FROM anvisa_meds 
-            WHERE LOWER(trade_name) LIKE ? OR LOWER(active_principle) LIKE ?
+            WHERE LOWER(trade_name) = ?
+               OR LOWER(active_principle) = ?
+               OR LOWER(trade_name) LIKE ?
+               OR LOWER(trade_name) LIKE ?
+               OR LOWER(trade_name) LIKE ?
+               OR LOWER(active_principle) LIKE ?
+               OR LOWER(active_principle) LIKE ?
+               OR LOWER(active_principle) LIKE ?
             ORDER BY 
                 CASE 
                     WHEN LOWER(trade_name) = ? THEN 1
@@ -245,12 +252,21 @@ class HealthLocalKB:
                 END
             LIMIT ?
         """
-        like_arg = f"%{clean_term}%"
-        prefix_arg = f"{clean_term}%"
+        prefix_pattern = f"{clean_term} %"
+        suffix_pattern = f"% {clean_term}"
+        mid_pattern = f"% {clean_term} %"
         try:
             with self._get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute(query, (like_arg, like_arg, clean_term, clean_term, prefix_arg, limit))
+                cur.execute(
+                    query,
+                    (
+                        clean_term, clean_term,
+                        prefix_pattern, suffix_pattern, mid_pattern,
+                        prefix_pattern, suffix_pattern, mid_pattern,
+                        clean_term, clean_term, prefix_pattern, limit
+                    )
+                )
                 rows = cur.fetchall()
                 return [dict(r) for r in rows]
         except Exception as e:
@@ -282,6 +298,12 @@ class HealthLocalKB:
             "para", "como", "sobre", "fazer", "onde", "quando", "tratamento", "saúde", "cura",
             "novo", "nova", "vida", "governo", "ministro", "brasil", "dizer", "disse", "pode",
             "esse", "essa", "esta", "este", "qual", "quem", "mais", "muito",
+            "paulo", "são", "rio", "minas", "gerais", "bahia", "brasília", "unidade", "unidades",
+            "posto", "postos", "hospital", "hospitais", "clínica", "clínicas", "médico", "médicos",
+            "paciente", "pacientes", "centro", "estado", "cidade", "ranking", "lista", "total",
+            "melhor", "melhores", "pior", "piores", "concentra", "concentram", "concentração",
+            "número", "todos", "todas", "primeiro", "último", "ano", "anos", "dia", "dias",
+            "meses", "taxa", "índice", "população", "serviço", "serviços", "público", "públicos"
         }
 
         for token in tokens:

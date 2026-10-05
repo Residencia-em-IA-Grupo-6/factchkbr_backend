@@ -403,6 +403,14 @@ class FactCheckOrchestrator:
                 elif "confidence" in item:
                     sub_c = item["confidence"]
 
+                try:
+                    sub_c = float(sub_c)
+                    if sub_c > 1.0:
+                        sub_c = sub_c / 100.0
+                    sub_c = max(0.0, min(1.0, sub_c))
+                except (ValueError, TypeError):
+                    sub_c = 0.80
+
                 # Determina justificativa pontual
                 sub_just = ""
                 if j_match and j_match.get("justification"):

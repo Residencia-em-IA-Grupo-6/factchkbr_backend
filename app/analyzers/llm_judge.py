@@ -110,12 +110,19 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                 s_v = sc.get("verdict", "")
                 s_v_str = s_v.value if hasattr(s_v, "value") else str(s_v)
                 s_conf = sc.get("confidence", 0.0)
-                user_content += f"  [{i}] \"{s_stmt}\" ➔ Veredito: {s_v_str} (Confiança: {int(s_conf * 100)}%)\n"
+                try:
+                    s_conf = float(s_conf)
+                    if s_conf > 1.0:
+                        s_conf = s_conf / 100.0
+                except (ValueError, TypeError):
+                    s_conf = 0.80
+                user_content += f"  [{i}] \"{s_stmt}\" ➔ Veredito: {s_v_str} (Confiança: {s_conf:.2f})\n"
             user_content += (
                 "\nSUA TAREFA EXCLUSIVA É JORNALÍSTICA E EDITORIAL:\n"
                 "- Redija o resumo ('summary'), as razões fáticas ('reasons') e as justificativas em 'claims_evaluation' "
                 "fundamentando POR QUE cada alegação recebeu esse veredito específico com base nas evidências.\n"
-                "- Mantenha RIGOROSAMENTE o veredito ('verdict') de cada alegação definido acima.\n\n"
+                "- Mantenha RIGOROSAMENTE o veredito ('verdict') de cada alegação definido acima.\n"
+                "- No campo 'confidence', retorne SEMPRE um número decimal entre 0.0 e 1.0 (ex: 0.85; NUNCA use porcentagem ou valores maiores que 1.0).\n\n"
             )
 
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
@@ -262,10 +269,19 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                                 ):
                                     sub_v = Verdict.VERDADEIRO
 
+                                raw_sub_conf = item.get("confidence", confidence)
+                                try:
+                                    sub_conf = float(raw_sub_conf)
+                                    if sub_conf > 1.0:
+                                        sub_conf = sub_conf / 100.0
+                                    sub_conf = max(0.0, min(1.0, sub_conf))
+                                except (ValueError, TypeError):
+                                    sub_conf = confidence
+
                                 parsed_sub_claims.append({
                                     "statement": sub_stmt,
                                     "verdict": sub_v,
-                                    "confidence": float(item.get("confidence", confidence)),
+                                    "confidence": sub_conf,
                                     "justification": sub_just,
                                 })
 
@@ -276,6 +292,14 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                             for idx, sc in enumerate(sub_claims):
                                 if idx < len(parsed_sub_claims) and sc.get("verdict"):
                                     parsed_sub_claims[idx]["verdict"] = sc["verdict"]
+                                    if sc.get("confidence") is not None:
+                                        try:
+                                            sc_c = float(sc["confidence"])
+                                            if sc_c > 1.0:
+                                                sc_c = sc_c / 100.0
+                                            parsed_sub_claims[idx]["confidence"] = max(0.0, min(1.0, sc_c))
+                                        except (ValueError, TypeError):
+                                            pass
                     elif sub_claims:
                         # Fallback se o modelo não gerou o array claims_evaluation
                         for sc in sub_claims:

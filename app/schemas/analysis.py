@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Verdict(str, Enum):
@@ -42,6 +42,19 @@ class SubClaimAnalysis(BaseModel):
     justification: str = Field(..., description="Justificativa sucinta detalhando por que a proposição é verdadeira ou falsa")
     sources: list[str] = Field(default_factory=list, description="Fontes diretas consultadas para esta proposição")
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v: Any) -> float:
+        if v is None:
+            return 0.50
+        try:
+            val = float(v)
+            if val > 1.0:
+                val = val / 100.0
+            return max(0.0, min(1.0, val))
+        except (ValueError, TypeError):
+            return 0.50
+
 
 class AnalyzeResponse(BaseModel):
     """
@@ -79,6 +92,19 @@ class AnalyzeResponse(BaseModel):
         description="Checagem discriminada por proposição atômica identificada no texto"
     )
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v: Any) -> float:
+        if v is None:
+            return 0.50
+        try:
+            val = float(v)
+            if val > 1.0:
+                val = val / 100.0
+            return max(0.0, min(1.0, val))
+        except (ValueError, TypeError):
+            return 0.50
+
 
 class AnalyzerResult(BaseModel):
     """
@@ -101,6 +127,19 @@ class AnalyzerResult(BaseModel):
     claim: str | None = None
     summary: str | None = None
     raw_details: dict[str, Any] | None = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v: Any) -> float:
+        if v is None:
+            return 0.0
+        try:
+            val = float(v)
+            if val > 1.0:
+                val = val / 100.0
+            return max(0.0, min(1.0, val))
+        except (ValueError, TypeError):
+            return 0.0
 
 
 class HealthResponse(BaseModel):
