@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # Ex: "claim_extractor,heuristic,fact_check_api,llm_judge"
     ACTIVE_ANALYZERS: str = "claim_extractor,heuristic,fact_check_api,llm_judge"
 
+    # Modo exclusivo de saúde (rejeita temas não relacionados e polêmicas políticas sobre saúde)
+    HEALTH_ONLY_MODE: bool = True
+
+
 
     # Configuração de Provedores de LLM (Ollama Local ou OpenAI)
     # Padrão: "ollama" com "qwen3.5:9b" para execução local gratuita

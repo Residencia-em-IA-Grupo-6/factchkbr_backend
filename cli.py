@@ -38,7 +38,22 @@ def print_step_trace(step_name: str, result: AnalyzerResult, duration: float, ra
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
     raw = result.raw_details or {}
 
-    if step_name == "heuristic":
+    if step_name == "health_gatekeeper":
+        is_health = raw.get("is_health_topic", False)
+        is_pol = raw.get("is_political_polemic", False)
+        allows = raw.get("allows_verification", False)
+        cat = raw.get("category", "OUT_OF_SCOPE")
+        signals = raw.get("matched_signals", [])
+
+        status_icon = "🩺" if allows else "🛑"
+        print(f"\n[{now_str}] ── [0/4] {status_icon} FILTRO TEMÁTICO DE SAÚDE ({duration:.3f}s) " + "─" * 29)
+        status_str = "APROVADO (Tema de Saúde Válido)" if allows else "BLOQUEADO (Fora do Escopo)"
+        print(f"      • Status do Escopo:      {status_str} [Categoria: {cat}]")
+        if signals:
+            print(f"      • Sinais Detectados:     {', '.join(signals)}")
+        print(f"      • Justificativa:         {result.reasons[0] if result.reasons else result.summary}")
+
+    elif step_name == "heuristic":
         score = raw.get("composite_sensationalism_score", 0.0)
         risk = raw.get("risk_level", "DESCONHECIDO")
         raw_feats = raw.get("raw_features", {})
@@ -219,10 +234,11 @@ async def main() -> None:
 
     orchestrator = FactCheckOrchestrator()
     active = [a.name for a in orchestrator.get_active_analyzers()]
+    modules_display = (["health_gatekeeper"] + active) if orchestrator.settings.HEALTH_ONLY_MODE else active
 
     print("\n" + "=" * 78)
     print("🔎 FactChkBR - Pipeline de Checagem Factual com Rastreabilidade")
-    print(f"⚙️  Módulos ativos: {' ➔ '.join(active)}")
+    print(f"⚙️  Módulos ativos: {' ➔ '.join(modules_display)}")
     if raw_mode:
         print("🔧 Modo RAW JSON ativo: detalhes internos serão exibidos.")
     if debug_mode:

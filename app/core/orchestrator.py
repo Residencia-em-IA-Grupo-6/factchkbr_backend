@@ -13,6 +13,7 @@ if _project_root not in sys.path:
 
 from app.config import Settings, get_settings
 from app.core.base import BaseAnalyzer
+from app.core.health_gatekeeper import HealthTopicGatekeeper
 from app.core.registry import registry
 from app.schemas.analysis import (
     AnalyzeResponse,
@@ -27,15 +28,16 @@ logger = logging.getLogger("factchkbr.core.orchestrator")
 class FactCheckOrchestrator:
     """
     Orquestrador / Ensemble responsável por:
-    1. Carregar os analisadores ativos definidos nas configurações (.env).
-    2. Executar os modelos em paralelo (asyncio.gather).
-    3. Consolidar os resultados em um veredito final ponderado, ignorando
-       analisadores que atuam puramente como extratores de features (sem veredito).
+    1. Executar gatekeeper temático (validação exclusiva de saúde e rejeição de retórica política).
+    2. Carregar os analisadores ativos definidos nas configurações (.env).
+    3. Executar os modelos em paralelo (asyncio.gather).
+    4. Consolidar os resultados em um veredito final ponderado.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._cached_analyzers: dict[str, BaseAnalyzer] = {}
+        self.health_gatekeeper = HealthTopicGatekeeper(settings=self.settings)
 
     def get_active_analyzers(self) -> list[BaseAnalyzer]:
         """
@@ -57,6 +59,10 @@ class FactCheckOrchestrator:
 
     async def aclose(self) -> None:
         """Encerra conexões HTTP e recursos assíncronos dos analisadores em cache."""
+        try:
+            await self.health_gatekeeper.aclose()
+        except Exception as e:
+            logger.warning("Erro ao fechar health_gatekeeper: %s", e)
         for name, analyzer in list(self._cached_analyzers.items()):
             if hasattr(analyzer, "aclose") and callable(analyzer.aclose):
                 try:
@@ -84,6 +90,7 @@ class FactCheckOrchestrator:
     ) -> AnalyzeResponse:
         """
         Executa o pipeline linear contextual com rastreabilidade de etapas:
+        0. Filtro Temático de Saúde (se HEALTH_ONLY_MODE=True: valida se e somente se for saúde, descartando polêmica política)
         1. Heurística (texto bruto, captura estilo e sensacionalismo) [Paralelo]
         2. Extrator de Alegações (spaCy + LLM, isola fatos atômicos e faz gatekeeping) [Paralelo]
         3. Fact-Check API & Leitura Horizontal (pesquisa evidências com a claim limpa)
@@ -100,6 +107,46 @@ class FactCheckOrchestrator:
                 reasons=["Pipeline de analisadores vazio."],
                 sources=[]
             )
+
+        # 0. Gatekeeper Temático de Saúde (valida exclusivamente saúde biomédica/sanitária)
+        if self.settings.HEALTH_ONLY_MODE:
+            t0_gate = time.perf_counter()
+            gate_decision = await self.health_gatekeeper.evaluate(text)
+            dur_gate = time.perf_counter() - t0_gate
+            logger.info(
+                "Gatekeeper de saúde avaliado em %.3fs (allows_verification=%s, category=%s)",
+                dur_gate, gate_decision.allows_verification, gate_decision.category
+            )
+
+            # Notifica callback de etapa se fornecido
+            if on_step:
+                gate_result = AnalyzerResult(
+                    analyzer_name="health_gatekeeper",
+                    verdict=Verdict.VERDADEIRO if gate_decision.allows_verification else Verdict.INCONCLUSIVO,
+                    confidence=1.0 if gate_decision.allows_verification else 0.0,
+                    claim=text[:120],
+                    reasons=[gate_decision.reason],
+                    sources=["Filtro de Escopo Temático FactChkBR (Saúde Pública e Biomedicina)"],
+                    raw_details=gate_decision.model_dump(),
+                )
+                cb = on_step("health_gatekeeper", gate_result, dur_gate)
+                if asyncio.iscoroutine(cb):
+                    await cb
+
+            if not gate_decision.allows_verification:
+                summary_msg = (
+                    f"Mensagem fora do escopo de verificação ({gate_decision.category}): {gate_decision.reason} "
+                    f"O FactChkBR realiza a validação de informações se e somente se o tema for estritamente relacionado à saúde pública ou biomedicina."
+                )
+                return AnalyzeResponse(
+                    claim=text[:120],
+                    verdict=Verdict.INCONCLUSIVO,
+                    confidence=0.0,
+                    summary=summary_msg,
+                    reasons=[gate_decision.reason],
+                    sources=["Filtro de Escopo Temático FactChkBR (Saúde Pública e Biomedicina)"],
+                    sub_claims=[]
+                )
 
         results: list[AnalyzerResult] = []
 
