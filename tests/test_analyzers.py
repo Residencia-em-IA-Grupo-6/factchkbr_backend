@@ -139,6 +139,28 @@ def test_heuristic_allcaps_short_words_and_articles():
 
 
 @pytest.mark.asyncio
+async def test_heuristic_commercial_slimming_scam_detection():
+    """Verifica se textos persuasivos de golpe comercial/emagrecimento milagroso pontuam como ALTO risco mesmo sem ALL CAPS."""
+    analyzer = HeuristicAnalyzer()
+    text = (
+        "Adesivo Mounjaro – Faça o teste Conheça o adesivo preferido das famosas "
+        "Um método natural que está viralizando por imitar os efeitos das canetinhas, "
+        "auxiliando no bem-estar de forma leve e acessível. 100% Natural Nova Fórmula mais poderosa "
+        "Mais disposição e leveza As clínicas cobravam R$ 1.200 nesse adesivo. Agora estão surtando "
+        "porque está por R$ 29 aqui. E a mulherada está secando na calada. Isso aqui não é para quem gosta "
+        "de passar fome ou pagar academia. É para quem quer secar de verdade, sem deixar de comer, sem levantar peso."
+    )
+    features = analyzer.extract_features(text)
+    assert features["composite_sensationalism_score"] >= 0.50
+
+    result = await analyzer.analyze(text, [])
+    assert result.raw_details["risk_level"] == "ALTO"
+    assert any("emagrecimento" in r.lower() for r in result.reasons)
+    assert any("comercial" in r.lower() or "preços" in r.lower() for r in result.reasons)
+
+
+
+@pytest.mark.asyncio
 async def test_claim_extractor_adaptive_morphology():
     """Verifica se o extrator detecta verbos dinâmicos sem listas engessadas (morfologia verbal)."""
     from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
@@ -756,6 +778,109 @@ def test_orchestrator_multi_claim_score_and_justification():
     # Verifica razões detalhadas com pontuação de cada alegação
     assert any("[alegação 1 - verdadeiro]" in r.lower() for r in response.reasons)
     assert any("[alegação 2 - fake]" in r.lower() for r in response.reasons)
+
+
+@pytest.mark.asyncio
+async def test_plumb_claim_evaluator_direct():
+    """Valida a avaliação epistêmica direta do Plumb-4B para alegações atômicas."""
+    from app.services.plumb_classifier import get_plumb_classifier, PlumbClaimResult
+
+    classifier = get_plumb_classifier()
+    agent = classifier._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente de teste")
+
+    # Caso 1: Alegação falsa de golpe comercial
+    fake_claim = "Adesivo de Mounjaro por 29 reais seca a barriga sem fazer academia"
+    fake_evidences = [
+        {
+            "source_name": "Anvisa",
+            "title": "Anvisa alerta que não existe Mounjaro em formato de adesivo; medicamento é injetável",
+            "rating": "Falso",
+        }
+    ]
+    res_fake = await classifier.evaluate_claim_async(fake_claim, evidences=fake_evidences)
+    assert isinstance(res_fake, PlumbClaimResult)
+    assert res_fake.verdict == Verdict.FAKE
+    assert res_fake.confidence >= 0.70
+    assert "fake" in res_fake.probabilities
+
+    # Caso 2: Alegação verdadeira confirmada
+    true_claim = "Anvisa suspendeu a comercialização de lotes de azeite de oliva fraudados"
+    true_evidences = [
+        {
+            "source_name": "Anvisa",
+            "title": "Anvisa proíbe comercialização e distribuição de lotes de azeite adulterados",
+            "rating": "Verdadeiro",
+        }
+    ]
+    res_true = await classifier.evaluate_claim_async(true_claim, evidences=true_evidences)
+    assert isinstance(res_true, PlumbClaimResult)
+    assert res_true.verdict == Verdict.VERDADEIRO
+    assert res_true.confidence >= 0.70
+
+
+@pytest.mark.asyncio
+async def test_fact_check_api_subclaim_decision_engine():
+    """Garante que a FactCheckApiAnalyzer execute a camada de decisão por alegação e preencha metadados."""
+    from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {}
+    mock_client.get.return_value = mock_resp
+
+    analyzer = FactCheckApiAnalyzer(http_client=mock_client)
+
+    claim = "Adesivo Mounjaro é vendido por 29 reais e emagrece sem esforço"
+    result = await analyzer.check_single_claim(claim)
+
+    assert "verdict" in result
+    assert result["verdict"] in (Verdict.FAKE, Verdict.VERDADEIRO, Verdict.SUSPEITO, Verdict.INCONCLUSIVO)
+    assert "decision_engine" in result
+    assert result["statement"] == claim
+    assert isinstance(result["sources"], list)
+    assert isinstance(result["reasons"], list)
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_honors_plumb_verdicts_and_fallback():
+    """Valida se o LLM Judge preserva os vereditos do Plumb-4B e gera fundamentação mesmo em fallback."""
+    from app.analyzers.llm_judge import LlmJudgeAnalyzer
+
+    judge = LlmJudgeAnalyzer()
+
+    sub_claims_input = [
+        {
+            "statement": "Adesivo Mounjaro emagrece sem academia",
+            "verdict": Verdict.FAKE,
+            "confidence": 0.95,
+            "justification": "Desmentido pela Anvisa.",
+        },
+        {
+            "statement": "Anvisa aprovou uso de Mounjaro injetável",
+            "verdict": Verdict.VERDADEIRO,
+            "confidence": 0.90,
+            "justification": "Registrado na Anvisa para diabetes tipo 2.",
+        },
+    ]
+
+    # Chamada sem servidor LLM rodando (fallback acionado)
+    res = await judge.analyze_with_context(
+        text="Adesivo Mounjaro emagrece sem academia mas Anvisa aprovou Mounjaro injetável",
+        urls=[],
+        sub_claims=sub_claims_input,
+    )
+
+    assert res.analyzer_name == "llm_judge"
+    assert res.verdict == Verdict.SUSPEITO  # Conteúdo misto (FAKE + VERDADEIRO)
+    assert len(res.raw_details["sub_claims"]) == 2
+    assert res.raw_details["sub_claims"][0]["verdict"] == Verdict.FAKE
+    assert res.raw_details["sub_claims"][1]["verdict"] == Verdict.VERDADEIRO
+    assert "Plumb-4B" in res.summary or "modelo de decisão" in res.summary.lower()
+
 
 
 

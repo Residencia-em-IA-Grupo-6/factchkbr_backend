@@ -193,6 +193,38 @@
       "category": "golpe_ou_publicidade_enganosa",
       "severity": 0.85,
       "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_25",
+      "label": "promessa de emagrecimento fácil/milagroso",
+      "regex": "\\b(?:secando na calada|secar na calada|secar de verdade|secar a barriga|perder barriga|sem passar fome|sem academia|sem pagar academia|sem deixar de comer|sem levantar peso|sem ficar sofrendo|sem sofrer|sem sofrimento|imitar os efeitos|imita os efeitos|efeito das canetinhas|efeito ozempic|efeito mounjaro|emagrecimento r[aá]pido|emagrecer sem esfor[çc]o|emagre[çc]a r[aá]pido|queima de gordura milagrosa|derrete gordura)\\b",
+      "category": "promessa_emagrecimento_facil",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_26",
+      "label": "fraude comercial/ancoragem de preço/fórmula mágica",
+      "regex": "\\b(?:as cl[íi]nicas cobravam|cobravam r\\$|est[ãa]o surtando|por apenas r\\$|est[áa] por r\\$|por r\\$\\s*\\d+|100%\\s*natural|nova f[óo]rmula|f[óo]rmula mais poderosa|fa[çc]a o teste|compre agora|adquira j[áa]|desconto exclusivo|vagas limitadas|[uú]ltimas unidades|m[eé]todo natural)\\b",
+      "category": "fraude_comercial_ancoragem",
+      "severity": 0.90,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_27",
+      "label": "falso endosso viral/celebridades",
+      "regex": "\\b(?:preferid[oa] das famosas|famosas est[ãa]o usando|segredo das famosas|segredo das artistas|est[áa] viralizando|viralizando|virou febre|na calada|a mulherada est[áa]|todo mundo est[áa] usando|sucesso absoluto)\\b",
+      "category": "falso_endosso_viral",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_28",
+      "label": "apelo a cura milagrosa/panaceia",
+      "regex": "\\b(?:adeus [àa]s dores|cura definitiva|nunca mais sinta|resultado garantido|comprovado cientificamente por especialistas ocultos|elimine de vez)\\b",
+      "category": "desinformacao_saude",
+      "severity": 0.95,
+      "source": "FACTCKBR_saude"
     }
   ]
 }

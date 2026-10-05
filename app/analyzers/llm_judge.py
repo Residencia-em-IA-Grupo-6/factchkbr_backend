@@ -46,32 +46,22 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             return self._fallback_result(text)
 
         system_prompt = (
-            "Você é um perito sênior em verificação de fatos e desinformação no Brasil, seguindo as diretrizes metodológicas do IFCN (International Fact-Checking Network) e das principais agências de checagem brasileiras (Lupa, Aos Fatos, Fato ou Fake).\n"
-            "Sua tarefa é avaliar criticamente a alegação confrontando-a com as evidências recuperadas.\n\n"
-            "DIRETRIZES EPISTEMOLÓGICAS FUNDAMENTAIS:\n"
-            "1. ÔNUS DA PROVA E ALEGAÇÕES NÃO ENCONTRADAS (NÃO ENCONTRADO ➔ PROVAVELMENTE FALSO / FAKE):\n"
-            "   - Em checagem de fatos sobre alegações extraordinárias, promessas em saúde, curas ou tratamentos milagrosos, simulações de diálogos/entrevistas com figuras públicas (ex: William Bonner, Drauzio Varella, Vera Fischer) ou anúncios comerciais, a afirmação exige sustentação fática verificável.\n"
-            "   - Quando NÃO forem encontradas matérias, comunicados oficiais ou checagens confirmando o fato alegado ('não encontrado' / ausência de respaldo em fontes confiáveis), a alegação DEVE ser julgada como 'FAKE' (classificada como boato sem sustentação factual ou provavelmente falso), com confiança em torno de 0.75 a 0.85.\n"
-            "   - Explique claramente no resumo e razões: 'Não foram encontrados registros oficiais ou jornalísticos confirmando a alegação. Afirmações sem respaldo em fontes confiáveis configuram boato / informação provavelmente falsa.'\n"
-            "   - Diálogos forjados, simulação de apresentadores ou endossos de celebridades para produtos ou métodos médicos sem registro jornalístico são formatos típicos de golpes comerciais (scams) e DEVEM ser classificados como 'FAKE'.\n\n"
-            "2. ATENÇÃO SOBRE O CAMPO 'verdict' (VERACIDADE DA ALEGAÇÃO):\n"
-            "   - O campo 'verdict' refere-se ESTRITAMENTE à veracidade da ALEGAÇÃO RECEBIDA (e NÃO à veracidade da notícia de desmentido).\n"
-            "   - Se a alegação recebida for desmentida ou refutada pelas fontes (ex: 'vacinas causam autismo'), o veredito DEVE ser 'FAKE' (e NUNCA 'VERDADEIRO') com confiança de 0.90 a 1.0.\n"
-            "   - Se a alegação for comprovada como verdadeira pelas fontes (ex: notas oficiais do Ministério da Saúde, confirmação de falecimento, portarias da Anvisa), o veredito é 'VERDADEIRO'.\n"
-            "   - Se a alegação contiver promessas, citações, produtos ou fatos NÃO ENCONTRADOS em fontes de referência, o veredito é 'FAKE' (provavelmente falso / boato sem respaldo fático).\n"
-            "   - Se a alegação trouxer mistura de fatos reais com afirmações falsas/sem respaldo, o veredito geral é 'SUSPEITO'.\n"
-            "   - O veredito 'INCONCLUSIVO' deve ser reservado EXCLUSIVAMENTE para acontecimentos em andamento com cobertura jornalística real de apuração/investigação sem conclusão definitiva.\n\n"
-            "3. CUIDADO CRÍTICO COM ALEGAÇÕES NEGATIVAS, DUPLA NEGAÇÃO E META-ASSERÇÕES DE DESMENTIDO:\n"
-            "   - Preste atenção extrema quando a alegação contiver negação ou desmentido em si (ex: 'não', 'não pode', 'é falso que...', 'não é verdade que...').\n"
-            "   - META-ASSERÇÕES DE DESMENTIDO: Se o texto recebido já afirma que um boato é falso (ex: 'É falso que o voto não vale no INSS', 'É mentira que vacinas causam autismo'), e as checagens/fontes confirmam que o boato é realmente falso, o veredito para a alegação recebida é VERDADEIRO (pois o autor está correto ao afirmar que o boato é falso).\n"
-            "   - Se a alegação recebida propaga o boato como se fosse verdade (ex: 'Voto não pode ser usado no INSS', 'Vacinas causam autismo'), e as fontes desmentem o boato, aí sim o veredito da alegação é FAKE.\n"
-            "   - Se as fontes confirmam o fato que o autor disse ser falso (ex: autor diz 'É falso que o Brasil ganhou a Copa de 2002', mas o Brasil de fato ganhou), o veredito é FAKE.\n"
-            "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Certifique-se de julgar se o que o autor AFIRMOU no texto corresponde aos fatos.\n"
-            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a tese do autor 'foi desmentida', 'foi refutada', 'é falsa', 'incorreta' ou 'boato sem respaldo', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
-            "4. AVALIAÇÃO DISCRIMINADA DE SUB-ALEGAÇÕES (claims_evaluation):\n"
-            "   - Se forem fornecidas múltiplas alegações atômicas, avalie CADA UMA isoladamente no campo 'claims_evaluation'.\n"
-            "   - Justifique pontualmente por que cada alegação é verdadeira, falsa ou provavelmente falsa (sem respaldo) com base nas evidências.\n"
-            "   - O veredito geral ('verdict') deve refletir a combinação: se contiver alegações falsas e verdadeiras no mesmo texto, o veredito geral DEVE ser 'SUSPEITO'. Se todas forem falsas/sem respaldo, 'FAKE'. Se todas forem verdadeiras, 'VERDADEIRO'.\n\n"
+            "Você é o redator sênior e analista editorial do FactChkBR, perito em verificação de fatos e desinformação no Brasil.\n"
+            "O motor neural de decisão epistêmica (Plumb-4B) é o responsável por determinar matematicamente a veracidade de cada alegação individual.\n"
+            "SUA MISSÃO EXCLUSIVA É JORNALÍSTICA E EDITORIAL: Redigir uma síntese explicativa e pedagógica ('summary'), enumerar as razões fáticas ('reasons') e elaborar justificativas claras para cada alegação em 'claims_evaluation' com base nas evidências.\n\n"
+            "DIRETRIZES FUNDAMENTAIS:\n"
+            "1. FIDELIDADE AOS VEREDITOS:\n"
+            "   - Mantenha rigorosa fidelidade aos vereditos determinados pelo modelo de decisão para cada alegação.\n"
+            "   - Não inverta nem altere os vereditos definidos.\n\n"
+            "2. ÔNUS DA PROVA E ALEGAÇÕES NÃO ENCONTRADAS:\n"
+            "   - Em checagem de fatos sobre alegações extraordinárias, promessas em saúde, curas ou tratamentos milagrosos, simulações de diálogos/entrevistas com figuras públicas ou anúncios comerciais, a afirmação exige sustentação fática verificável.\n"
+            "   - Quando NÃO forem encontradas matérias, comunicados oficiais ou checagens confirmando o fato alegado ('não encontrado' / ausência de respaldo em fontes confiáveis), explique claramente que a afirmação configura boato sem sustentação fática ou provavelmente falso.\n"
+            "   - Diálogos forjados, simulação de apresentadores ou endossos de celebridades para produtos ou métodos médicos sem registro jornalístico são formatos típicos de golpes comerciais (scams) e devem ser justificados como tal.\n\n"
+            "3. CLAREZA EDITORIAL E COERÊNCIA:\n"
+            "   - Certifique-se de que a explicação em 'summary', 'reasons' e 'claims_evaluation' justifique plenamente a classificação atribuída.\n"
+            "   - Se a alegação recebida for desmentida ou refutada pelas fontes, o veredito é FAKE.\n"
+            "   - Se for confirmada por fontes oficiais/jornalismo de referência, o veredito é VERDADEIRO.\n"
+            "   - Se trouxer mistura de fatos reais com alegações sem respaldo, o veredito geral é SUSPEITO.\n\n"
             "FORMATO DE RESPOSTA:\n"
             "Retorne RIGOROSAMENTE apenas um JSON no formato:\n"
             "{\n"
@@ -85,7 +75,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             '      "statement": "texto da alegação avaliada",\n'
             '      "verdict": "VERDADEIRO" | "FAKE" | "SUSPEITO" | "INCONCLUSIVO",\n'
             '      "confidence": 0.0 a 1.0,\n'
-            '      "justification": "Explicação pontual do porquê esta alegação é verdadeira, falsa ou provavelmente falsa por ausência de dados"\n'
+            '      "justification": "Explicação pontual do porquê esta alegação recebeu este veredito com base nas evidências"\n'
             '    }\n'
             '  ]\n'
             "}"
@@ -114,13 +104,19 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             )
 
         if sub_claims:
-            user_content += "Alegações individuais isoladas para checagem discriminada:\n"
+            user_content += "Vereditos determinados pelo modelo de decisão matemática (Plumb-4B) para cada alegação:\n"
             for i, sc in enumerate(sub_claims, 1):
                 s_stmt = sc.get("statement", "")
                 s_v = sc.get("verdict", "")
                 s_v_str = s_v.value if hasattr(s_v, "value") else str(s_v)
-                user_content += f"  [{i}] \"{s_stmt}\" (Varredura preliminar: {s_v_str})\n"
-            user_content += "\nPreencha obrigatoriamente o campo 'claims_evaluation' discriminando e justificando cada uma dessas alegações.\n\n"
+                s_conf = sc.get("confidence", 0.0)
+                user_content += f"  [{i}] \"{s_stmt}\" ➔ Veredito: {s_v_str} (Confiança: {int(s_conf * 100)}%)\n"
+            user_content += (
+                "\nSUA TAREFA EXCLUSIVA É JORNALÍSTICA E EDITORIAL:\n"
+                "- Redija o resumo ('summary'), as razões fáticas ('reasons') e as justificativas em 'claims_evaluation' "
+                "fundamentando POR QUE cada alegação recebeu esse veredito específico com base nas evidências.\n"
+                "- Mantenha RIGOROSAMENTE o veredito ('verdict') de cada alegação definido acima.\n\n"
+            )
 
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
             score = heuristic_features["composite_sensationalism_score"]
@@ -275,6 +271,11 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
 
                         if polarity_corrected and len(parsed_sub_claims) == 1:
                             parsed_sub_claims[0]["verdict"] = verdict
+                        elif sub_claims:
+                            # Preserva os vereditos objetivos determinados pelo classificador de decisão
+                            for idx, sc in enumerate(sub_claims):
+                                if idx < len(parsed_sub_claims) and sc.get("verdict"):
+                                    parsed_sub_claims[idx]["verdict"] = sc["verdict"]
                     elif sub_claims:
                         # Fallback se o modelo não gerou o array claims_evaluation
                         for sc in sub_claims:
@@ -307,6 +308,37 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
 
     def _fallback_result(self, text: str, sub_claims: list[dict[str, Any]] | None = None) -> AnalyzerResult:
         """Resultado padrão caso o provedor LLM esteja indisponível."""
+        if sub_claims:
+            from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+            fc = FactCheckApiAnalyzer()
+            verdict, confidence, agg_reasons = fc.aggregate_sub_verdicts(sub_claims)
+            summary_parts = []
+            for sc in sub_claims:
+                s = sc.get("statement", "")
+                v = sc.get("verdict", "")
+                v_str = v.value if hasattr(v, "value") else str(v)
+                j = sc.get("justification", "")
+                summary_parts.append(f"• \"{s}\": {v_str} ({j})")
+            summary = (
+                f"Avaliação fundamentada pelo classificador de decisão Plumb-4B: "
+                f"Resultado consolidado '{verdict.value}' com base em {len(sub_claims)} alegação(ões) checada(s)."
+            )
+            return AnalyzerResult(
+                analyzer_name="llm_judge",
+                verdict=verdict,
+                confidence=confidence,
+                claim=text.strip(),
+                summary=summary,
+                reasons=agg_reasons,
+                sources=["Classificador de Decisão Plumb-4B", "Fontes e Checadores Oficiais"],
+                raw_details={
+                    "model": self.settings.get_llm_model(),
+                    "provider": self.settings.LLM_PROVIDER,
+                    "engine": "plumb_subclaims",
+                    "sub_claims": sub_claims,
+                },
+            )
+
         return AnalyzerResult(
             analyzer_name="llm_judge",
             verdict=Verdict.INCONCLUSIVO,
@@ -318,7 +350,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             raw_details={
                 "model": self.settings.get_llm_model(),
                 "provider": self.settings.LLM_PROVIDER,
-                "sub_claims": sub_claims or [],
+                "sub_claims": [],
             },
         )
 

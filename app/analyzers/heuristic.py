@@ -83,13 +83,26 @@ class HeuristicAnalyzer(BaseAnalyzer):
         # 6. Densidade de Léxico de Urgência, Clickbait e Golpes Comerciais (do repositório desacoplado)
         urgency_patterns = self.repository.get_urgency_patterns()
         urgency_matches_count = 0
+        weighted_lexical_impact = 0.0
 
-        for _, pattern, _ in urgency_patterns:
+        for _, pattern, severity in urgency_patterns:
             matches = pattern.findall(text)
             if matches:
-                urgency_matches_count += len(matches)
+                n_m = len(matches)
+                urgency_matches_count += n_m
+                weighted_lexical_impact += n_m * severity
 
         urgency_density = (urgency_matches_count / n_words) if n_words > 0 else 0.0
+
+        # Escore léxico composto: avalia densidade relativa e saturação absoluta de gatilhos graves
+        lexical_score = min(
+            max(
+                urgency_density * 8.0,
+                (urgency_matches_count / 4.0) * 0.9,
+                (weighted_lexical_impact / 3.5) * 1.0,
+            ),
+            1.0,
+        )
 
         # 7. Detecção de Formato de Diálogo Simulado / Atribuição de Entrevista Forjada
         dialogue_pattern = re.compile(
@@ -100,12 +113,12 @@ class HeuristicAnalyzer(BaseAnalyzer):
 
         # 8. Escore Composto de Sensacionalismo e Risco Estilístico (Ponderação normalizada)
         raw_score = (
-            0.15 * min(uppercase_ratio * 3.0, 1.0)
-            + 0.20 * min(allcaps_words_ratio * 4.0, 1.0)
-            + 0.15 * min(excessive_punc * 0.25, 1.0)
-            + 0.10 * min(exclamation_density * 0.5, 1.0)
-            + 0.25 * min(urgency_density * 5.0, 1.0)
-            + 0.15 * min(dialogue_matches * 0.5, 1.0)
+            0.10 * min(uppercase_ratio * 3.0, 1.0)
+            + 0.15 * min(allcaps_words_ratio * 4.0, 1.0)
+            + 0.10 * min(excessive_punc * 0.25, 1.0)
+            + 0.05 * min(exclamation_density * 0.5, 1.0)
+            + 0.50 * lexical_score
+            + 0.10 * min(dialogue_matches * 0.5, 1.0)
         )
 
         return {
@@ -125,6 +138,14 @@ class HeuristicAnalyzer(BaseAnalyzer):
         Serve como base de apoio para análises mais completas e outros modelos.
         """
         metrics = self.extract_features(text)
+        score = metrics["composite_sensationalism_score"]
+
+        # Identifica categorias ativadas para justificar o risco
+        urgency_patterns = self.repository.get_urgency_patterns()
+        matched_categories: set[str] = set()
+        for label, pattern, _ in urgency_patterns:
+            if pattern.search(text):
+                matched_categories.add(label)
 
         # Detecta diálogo simulado para enriquecer as razões e detalhes
         dialogue_pattern = re.compile(
@@ -138,6 +159,22 @@ class HeuristicAnalyzer(BaseAnalyzer):
             reasons.append(
                 "Presença de estrutura de diálogo/entrevista simulada (atribuição direta de falas a figuras públicas, formato frequente em golpes e publicidade fraudulenta)."
             )
+        if any("emagrecimento" in cat or "canetinha" in cat for cat in matched_categories):
+            reasons.append(
+                "Promessas apelativas de emagrecimento fácil ou milagroso sem dieta/exercícios (tática recorrente em fraudes comerciais de saúde)."
+            )
+        if any("comercial" in cat or "ancoragem" in cat for cat in matched_categories):
+            reasons.append(
+                "Táticas agressivas de apelo comercial, ancoragem artificial de preços ('de R$ X por R$ Y') ou falsa fórmula poderosa."
+            )
+        if any("famosas" in cat or "endosso" in cat for cat in matched_categories):
+            reasons.append(
+                "Menção a falso endosso de celebridades ou alegações de viralização para criar urgência e autoridade simulada."
+            )
+        if any("cura" in cat or "secreta" in cat or "desinformacao" in cat for cat in matched_categories):
+            reasons.append(
+                "Detecção de termos alusivos a curas milagrosas, remédios secretos ou tratamentos ocultados pela medicina."
+            )
         if metrics["allcaps_words_ratio"] > 0.15:
             reasons.append(
                 f"Uso acentuado de palavras em caixa alta ({int(metrics['allcaps_words_ratio'] * 100)}%), indicando ênfase visual atípica."
@@ -146,7 +183,7 @@ class HeuristicAnalyzer(BaseAnalyzer):
             reasons.append(
                 f"Presença de pontuação repetida/enfática ({int(metrics['excessive_punctuation_count'])} ocorrências)."
             )
-        if metrics["urgency_lexicon_density"] > 0.0:
+        if metrics["urgency_lexicon_density"] > 0.0 and not reasons:
             reasons.append(
                 "Detecção de termos apelativos, gatilhos de urgência ou fórmulas de apelo comercial/cura milagrosa."
             )
@@ -158,13 +195,19 @@ class HeuristicAnalyzer(BaseAnalyzer):
         if not reasons:
             reasons.append("Extração concluída: texto com padrões estilísticos neutros.")
 
+        risk_level = "ALTO" if score >= 0.50 else ("MÉDIO" if score >= 0.25 else "BAIXO")
+
         return AnalyzerResult(
             analyzer_name="heuristic",
             verdict=None,  # Nenhum veredito emitido (módulo puramente descritivo/feature extractor)
             confidence=0.0,
             reasons=reasons,
             sources=["Heurística Textual FactChkBR (Base: FACTCKBR)"],
-            summary="Extração de métricas de sensacionalismo e estilometria para suporte a análises completas.",
-            raw_details=metrics,
+            summary=f"Extração de métricas de sensacionalismo e estilometria (Risco Estilístico: {risk_level}, Score: {score:.2f}).",
+            raw_details={
+                **metrics,
+                "risk_level": risk_level,
+                "matched_categories": list(matched_categories),
+            },
         )
 

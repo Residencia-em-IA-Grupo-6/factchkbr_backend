@@ -8,6 +8,8 @@ import logging
 from typing import Any
 from pydantic import BaseModel, Field
 
+from app.schemas.analysis import Verdict
+
 logger = logging.getLogger("factchkbr.services.plumb_classifier")
 
 TOPIC_MAP: dict[str, str] = {
@@ -28,6 +30,13 @@ CRITERIA: dict[str, str] = {
     "other": "greetings, casual chat, personal messages, religious blessings, other miscellaneous topics",
 }
 
+CLAIM_CRITERIA: dict[str, str] = {
+    "fake": "false, debunked by fact-checkers, unauthorized or fraudulent medical product, contradicted by health authorities, or fabricated miracle claim without official evidence",
+    "verdadeiro": "factually accurate, confirmed by official records, regulatory approval, or reputable journalism",
+    "suspeito": "misleading, partially true, exaggerated claims, omitted risks, or conflicting facts",
+    "inconclusivo": "insufficient evidence to verify or refute, ongoing investigation, or lack of conclusive data",
+}
+
 
 class PlumbTopicResult(BaseModel):
     """Resultado da classificação de tópico gerado pelo Plumb-4B."""
@@ -37,6 +46,15 @@ class PlumbTopicResult(BaseModel):
     probabilities: dict[str, float] = Field(default_factory=dict, description="Distribuição de probabilidades normalizada por tema em português")
     is_health: bool = Field(..., description="True se o tema for classificado como Saúde")
     health_probability: float = Field(..., description="Probabilidade atribuída ao tema Saúde")
+
+
+class PlumbClaimResult(BaseModel):
+    """Resultado da checagem epistêmica de uma alegação factual atômica pelo Plumb-4B."""
+    statement: str = Field(..., description="Alegação factual atômica avaliada")
+    verdict: Verdict = Field(..., description="Veredito epistêmico emitido pelo Plumb-4B")
+    confidence: float = Field(..., description="Grau de certeza da decisão (0.0 a 1.0)")
+    probabilities: dict[str, float] = Field(default_factory=dict, description="Distribuição de probabilidades por veredito")
+    rationale_hint: str = Field(default="", description="Pista ou resumo do critério orientador da decisão")
 
 
 class PlumbTopicClassifier:
@@ -139,6 +157,102 @@ class PlumbTopicClassifier:
         Executa a classificação de forma assíncrona em threadpool (sem travar o event loop).
         """
         return await asyncio.to_thread(self.classify, text)
+
+    def evaluate_claim(
+        self,
+        claim: str,
+        evidences: list[Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> PlumbClaimResult | None:
+        """
+        Avalia sincronamente a veracidade de uma proposição factual confrontando com evidências.
+        Utiliza o motor de inferência calibrado do Plumb-4B via JevK5.
+        """
+        agent = self._ensure_loaded()
+        if agent is None:
+            return None
+
+        clean_claim = claim.strip()
+        if not clean_claim:
+            return None
+
+        simplified_evidences: list[dict[str, Any]] = []
+        for e in (evidences or [])[:5]:
+            if isinstance(e, dict):
+                src = e.get("source_name") or e.get("source") or "Fonte"
+                title = e.get("title", "")
+                snippet = e.get("snippet") or e.get("finding") or ""
+                rating = e.get("rating") or e.get("stance") or ""
+                simplified_evidences.append({
+                    "source": src,
+                    "title": title,
+                    "finding": snippet or title,
+                    "rating": rating,
+                })
+            elif hasattr(e, "model_dump"):
+                d = e.model_dump()
+                simplified_evidences.append({
+                    "source": d.get("source_name", "Fonte"),
+                    "title": d.get("title", ""),
+                    "finding": d.get("snippet") or d.get("title", ""),
+                    "rating": d.get("rating") or d.get("stance", ""),
+                })
+
+        import json
+        state = {
+            "target_claim": clean_claim,
+            "evidences": simplified_evidences,
+            "context": context or {},
+        }
+
+        question = {
+            "type": "choice",
+            "instructions": (
+                "Evaluate the factual truthfulness of the target claim strictly against the provided evidence, "
+                "scientific reality, official health regulations (Anvisa/WHO/MS), and the legal burden of proof. "
+                "Claims of unverified treatments, unauthorized miracle products, or fabricated endorsements without official backing must be classified as fake."
+            ),
+            "criteria": CLAIM_CRITERIA,
+        }
+
+        try:
+            state_str = json.dumps(state, ensure_ascii=False)
+            res = agent.decide(state_str, question)
+            choice = str(res.get("choice", "inconclusivo")).lower()
+            raw_probs = res.get("probabilities", {})
+            conf = float(res.get("confidence", 0.70))
+
+            verdict_map = {
+                "fake": Verdict.FAKE,
+                "verdadeiro": Verdict.VERDADEIRO,
+                "suspeito": Verdict.SUSPEITO,
+                "inconclusivo": Verdict.INCONCLUSIVO,
+            }
+            verdict = verdict_map.get(choice, Verdict.INCONCLUSIVO)
+
+            probs = {k: round(float(v), 4) for k, v in raw_probs.items()}
+
+            return PlumbClaimResult(
+                statement=clean_claim,
+                verdict=verdict,
+                confidence=round(conf, 4),
+                probabilities=probs,
+                rationale_hint=f"Decisão Plumb-4B ({choice}, conf: {conf:.2f}) com {len(simplified_evidences)} evidência(s).",
+            )
+        except Exception as exc:
+            logger.warning("Falha na avaliação de alegação do Plumb-4B (%s): %s", type(exc).__name__, exc)
+            return None
+
+    async def evaluate_claim_async(
+        self,
+        claim: str,
+        evidences: list[Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> PlumbClaimResult | None:
+        """
+        Executa a avaliação de alegação de forma assíncrona em threadpool (sem bloquear o event loop).
+        """
+        return await asyncio.to_thread(self.evaluate_claim, claim, evidences, context)
 
 
 # Helper singleton

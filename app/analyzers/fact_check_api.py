@@ -896,6 +896,25 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text)
 
+        # Camada de Decisão Neural Plumb-4B (Cenário 2: verificação matemática por alegação)
+        plumb_used = False
+        plumb_probs: dict[str, float] = {}
+        try:
+            from app.services.plumb_classifier import get_plumb_classifier
+            plumb = get_plumb_classifier()
+            plumb_res = await plumb.evaluate_claim_async(clean_text, evidences=all_evidences)
+            if plumb_res is not None:
+                verdict = plumb_res.verdict
+                confidence = plumb_res.confidence
+                plumb_probs = plumb_res.probabilities
+                plumb_used = True
+                logger.info(
+                    "Plumb-4B avaliou alegação '%s' -> %s (conf: %.3f)",
+                    clean_text[:50], verdict, confidence
+                )
+        except Exception as e:
+            logger.debug("Plumb-4B não disponível para alegação '%s': %s", clean_text[:50], e)
+
         sources = []
         for e in all_evidences[:4]:
             sources.append(f"{e.source_name}: {e.title}")
@@ -919,6 +938,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             "justification": justification,
             "reasons": reasons,
             "sources": sources,
+            "decision_engine": "plumb-4b" if plumb_used else "rules",
+            "probabilities": plumb_probs,
             "evidences": [e.model_dump() for e in all_evidences[:6]],
             "anvisa_local_count": len(local_evidences),
             "google_fact_check_count": len(google_evidences),
