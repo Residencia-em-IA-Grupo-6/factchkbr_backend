@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     # Modo exclusivo de saúde (rejeita temas não relacionados e polêmicas políticas sobre saúde)
     HEALTH_ONLY_MODE: bool = True
 
-
-
+    # Classificação temática via Laya (NLP Multilíngue)
+    LAYA_ENABLED: bool = True
+    LAYA_MODEL_NAME: str = "convaiinnovations/laya"
+    LAYA_SUBFOLDER: str = "multilingual"
     # Configuração de Provedores de LLM (Ollama Local ou OpenAI)
     # Padrão: "ollama" com "qwen3.5:9b" para execução local gratuita
     LLM_PROVIDER: str = "ollama"  # "ollama" | "openai"

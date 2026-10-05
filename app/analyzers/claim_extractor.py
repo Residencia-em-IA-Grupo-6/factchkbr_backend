@@ -133,7 +133,7 @@ class SpacyPreprocessor:
         return {
             "subject": subj or "Sujeito",
             "predicate": pred or "declara",
-            "object": obj or text[:80],
+            "object": obj or text.strip(),
         }
 
     def clean_text(self, text: str) -> str:

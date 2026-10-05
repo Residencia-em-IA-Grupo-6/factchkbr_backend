@@ -176,3 +176,76 @@ async def test_orchestrator_early_exit_on_political_health_polemic():
     assert step_trace == ["health_gatekeeper"]
 
     await orchestrator.aclose()
+
+
+def test_laya_topic_classifier_direct():
+    """Valida a inferência direta do LayaTopicClassifier para as principais categorias."""
+    from app.services.laya_classifier import get_laya_classifier
+    clf = get_laya_classifier()
+
+    # 1. Saúde (mesmo sem estar no dicionário léxico tradicional)
+    res_mounjaro = clf.classify("Adesivo Mounjaro - emagrecimento rápido sem passar fome")
+    assert res_mounjaro is not None
+    assert res_mounjaro.topic == "Saúde"
+    assert res_mounjaro.is_health is True
+
+    # 2. Política
+    res_pol = clf.classify("Lula assina medida provisória que altera regras para as eleições de 2026")
+    assert res_pol is not None
+    assert res_pol.topic in ("Política", "Economia")
+    assert res_pol.is_health is False
+
+    # 3. Esportes
+    res_esp = clf.classify("Flamengo vence por 3 a 0 no Maracanã e assume a liderança do Brasileirão")
+    assert res_esp is not None
+    assert res_esp.topic == "Esportes"
+    assert res_esp.is_health is False
+
+    # 4. Entretenimento
+    res_ent = clf.classify("Novo filme da Marvel estreia quebrando recordes de bilheteria mundial nos cinemas")
+    assert res_ent is not None
+    assert res_ent.topic == "Entretenimento"
+    assert res_ent.is_health is False
+
+    # 5. Economia
+    res_eco = clf.classify("Banco Central decide manter a taxa Selic em 10,50% ao ano após reunião do Copom")
+    assert res_eco is not None
+    assert res_eco.topic == "Economia"
+    assert res_eco.is_health is False
+
+
+@pytest.mark.asyncio
+async def test_gatekeeper_laya_evaluates_mounjaro_ad(gatekeeper: HealthTopicGatekeeper):
+    """
+    Garante que anúncios de produtos de saúde/emagrecimento (como adesivo Mounjaro)
+    são aprovados pelo classificador Laya, corrigindo o falso-bloqueio léxico anterior.
+    """
+    text = (
+        "Adesivo Mounjaro – Faça o teste Conheça o adesivo preferido das famosas. "
+        "Um método natural que está viralizando por imitar os efeitos das canetinhas, "
+        "auxiliando no bem-estar de forma leve e acessível. 100% Natural Nova Fórmula mais poderosa."
+    )
+    decision = await gatekeeper.evaluate(text)
+    assert decision.allows_verification is True
+    assert decision.is_health_topic is True
+    assert decision.detected_topic == "Saúde"
+    assert decision.category in ("BIOMEDICAL_HEALTH", "PUBLIC_HEALTH")
+
+
+@pytest.mark.asyncio
+async def test_gatekeeper_laya_blocks_sports_and_entertainment(gatekeeper: HealthTopicGatekeeper):
+    """
+    Garante que textos de esportes e entretenimento são bloqueados com justificativa informativa.
+    """
+    text_esporte = "Flamengo e Palmeiras disputam o título da Copa do Brasil no próximo domingo."
+    decision_esp = await gatekeeper.evaluate(text_esporte)
+    assert decision_esp.allows_verification is False
+    assert decision_esp.category == "OUT_OF_SCOPE"
+    assert decision_esp.detected_topic == "Esportes"
+
+    text_cinema = "Filme brasileiro vence festival de cinema internacional e recebe aplausos dos jurados."
+    decision_cin = await gatekeeper.evaluate(text_cinema)
+    assert decision_cin.allows_verification is False
+    assert decision_cin.category == "OUT_OF_SCOPE"
+    assert decision_cin.detected_topic == "Entretenimento"
+

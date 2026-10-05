@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
+from app.services.laya_classifier import LayaTopicClassifier, get_laya_classifier
 
 logger = logging.getLogger("factchkbr.core.health_gatekeeper")
 
@@ -60,6 +61,8 @@ HEALTH_TERMS: set[str] = {
     "contaminada", "contaminação", "contaminacao", "intoxicação", "intoxicacao",
     "veneno", "tóxico", "toxico", "letal", "bula", "substância", "substâncias",
     "destrói células", "destroi celulas", "combate o câncer", "cura do câncer",
+    "mounjaro", "ozempic", "wegovy", "emagrecimento", "emagrecer", "perder peso",
+    "perda de peso", "suplemento", "suplementos", "adesivo emagrecedor",
 
     # Autoridades Sanitárias, Clínicas e Profissionais de Saúde
     "anvisa", "sus", "oms", "who", "fiocruz", "butantan", "instituto butantan",
@@ -81,7 +84,8 @@ SPECIFIC_BIOMEDICAL_TERMS: set[str] = {
     "cloroquina", "hidroxicloroquina", "dipirona", "paracetamol", "antibiótico",
     "adulterado", "contaminado", "intoxicação", "anvisa", "cura", "efeito colateral",
     "efeito adverso", "trombose", "miocardite", "oropouche", "zika", "chikungunya",
-    "sarampo", "remédio", "medicamento", "quimioterapia"
+    "sarampo", "remédio", "medicamento", "quimioterapia", "mounjaro", "ozempic",
+    "wegovy", "emagrecimento", "emagrecer"
 }
 
 # Padrões morfossintáticos de termos biomédicos derivados
@@ -89,7 +93,8 @@ RE_BIOMEDICAL_PATTERNS = re.compile(
     r"\b(?:"
     r"cancer[ií]gen[oa]s?|oncol[oó]gic[oa]s?|tumora[li]s?|"
     r"c[eé]lulas?\s+(?:cancer[ií]genas?|tumorais?|malignas?|doentes?)|"
-    r"rejuvenesc\w+|antienvelhec\w+|"
+    r"rejuvenesc\w+|antienvelhec\w+|emagrec\w+|perder\s+peso|"
+    r"mounjaro|ozempic|wegovy|"
     r"imunol[oó]gic\w+|antioxidant\w+|"
     r"antibi[oó]tic\w+|anti[-]?inflamat[oó]ri\w+|"
     r"quimioter[aá]p\w+|radioter[aá]p\w+|"
@@ -153,6 +158,8 @@ class HealthGatekeeperDecision(BaseModel):
     category: str = Field(..., description="BIOMEDICAL_HEALTH | PUBLIC_HEALTH | POLITICAL_POLEMIC | OUT_OF_SCOPE")
     reason: str = Field(..., description="Justificativa da decisão")
     matched_signals: list[str] = Field(default_factory=list, description="Sinais léxicos detectados")
+    detected_topic: str | None = Field(default=None, description="Tema classificado pelo modelo NLP (ex: Saúde, Política, Entretenimento, etc.)")
+    topic_confidence: float | None = Field(default=None, description="Grau de confiança da classificação temática")
 
 
 # ==============================================================================
@@ -198,13 +205,27 @@ class HealthTopicGatekeeper:
     _cache: OrderedDict[str, HealthGatekeeperDecision] = OrderedDict()
     _CACHE_MAXSIZE = 512
 
-    def __init__(self, http_client: httpx.AsyncClient | None = None, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient | None = None,
+        settings: Settings | None = None,
+        laya_classifier: Any = None,
+    ) -> None:
         self.settings = settings or get_settings()
         self._owned_client = http_client is None
         self.http_client = http_client or httpx.AsyncClient(
             timeout=10.0,
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
+        if laya_classifier is not None:
+            self.laya_classifier = laya_classifier
+        elif getattr(self.settings, "LAYA_ENABLED", True):
+            self.laya_classifier = LayaTopicClassifier(
+                model_name=getattr(self.settings, "LAYA_MODEL_NAME", "convaiinnovations/laya"),
+                subfolder=getattr(self.settings, "LAYA_SUBFOLDER", "multilingual"),
+            )
+        else:
+            self.laya_classifier = None
 
     async def aclose(self) -> None:
         if self._owned_client:
@@ -280,21 +301,118 @@ class HealthTopicGatekeeper:
     async def evaluate(self, text: str) -> HealthGatekeeperDecision:
         """
         Executa a validação de escopo temático com cache LRU:
-        1. Fast-path heurístico em CPU (0ms).
-        2. Classificação semântica via LLM para casos com nuances ou declarações mistas.
+        1. Classificação temática via Laya (NLP Multilíngue não-autoregressivo).
+        2. Fast-path heurístico em CPU (0ms) como contingência.
+        3. Classificação semântica via LLM para casos com nuances ou declarações mistas.
         """
         cache_key = hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
         if cache_key in self._cache:
             self._cache.move_to_end(cache_key)
             return self._cache[cache_key]
 
-        # 1. Tenta resolução rápida via regras determinísticas
+        norm = text.lower()
+        matched_health = [t for t in HEALTH_TERMS if re.search(rf"\b{re.escape(t)}\b", norm)]
+        biomedical_regex_matches = [m.group(0) for m in RE_BIOMEDICAL_PATTERNS.finditer(norm)]
+        if biomedical_regex_matches:
+            matched_health.extend(biomedical_regex_matches)
+
+        has_political_fig = bool(RE_POLITICAL_FIGURES.search(norm))
+        has_speech_verb = bool(RE_SPEECH_VERBS.search(norm))
+        has_pol_rhetoric = bool(RE_POLITICAL_RHETORIC_CONTEXT.search(norm))
+        matched_biomedical = [t for t in SPECIFIC_BIOMEDICAL_TERMS if re.search(rf"\b{re.escape(t)}\b", norm)]
+        if biomedical_regex_matches:
+            matched_biomedical.extend(biomedical_regex_matches)
+
+        # 1. Classificação Temática via Laya (se ativo)
+        if self.laya_classifier is not None:
+            laya_result = await self.laya_classifier.classify_async(text)
+            if laya_result is not None:
+                # 1.1 Salvaguarda biomédica expressa:
+                # Se o texto contém termos biomédicos estritos (ex: vacina, dengue, câncer, remédio)
+                if matched_biomedical:
+                    signals = list(dict.fromkeys(matched_biomedical))[:4]
+                    decision = HealthGatekeeperDecision(
+                        is_health_topic=True,
+                        is_political_polemic=False,
+                        allows_verification=True,
+                        category="BIOMEDICAL_HEALTH",
+                        reason=f"Texto contém alegação médica/sanitária substantiva passível de validação científica ({signals[0]}).",
+                        matched_signals=signals,
+                        detected_topic="Saúde",
+                        topic_confidence=round(max(laya_result.health_probability, 0.85), 2),
+                    )
+                    self._save_cache(cache_key, decision)
+                    return decision
+
+                # 1.2 Se classificado como Política
+                if laya_result.topic == "Política":
+                    decision = HealthGatekeeperDecision(
+                        is_health_topic=False,
+                        is_political_polemic=True,
+                        allows_verification=False,
+                        category="POLITICAL_POLEMIC",
+                        reason=f"Texto classificado no tema de Política ({laya_result.confidence * 100:.1f}% de certeza). O FactChkBR valida exclusivamente alegações factuais sobre saúde pública e biomedicina, excluindo debates político-partidários.",
+                        matched_signals=matched_health[:4],
+                        detected_topic="Política",
+                        topic_confidence=round(laya_result.confidence, 2),
+                    )
+                    self._save_cache(cache_key, decision)
+                    return decision
+
+                # 1.3 Se classificado em outro tema fora de escopo (Entretenimento, Esportes, Economia, Outros)
+                if laya_result.topic in ("Entretenimento", "Esportes", "Economia", "Outros"):
+                    decision = HealthGatekeeperDecision(
+                        is_health_topic=False,
+                        is_political_polemic=False,
+                        allows_verification=False,
+                        category="OUT_OF_SCOPE",
+                        reason=f"O tema principal identificado foi '{laya_result.topic}' ({laya_result.confidence * 100:.1f}% de certeza). O FactChkBR realiza a validação de informações se e somente se o tema for estritamente relacionado à saúde pública ou biomedicina.",
+                        matched_signals=matched_health[:4],
+                        detected_topic=laya_result.topic,
+                        topic_confidence=round(laya_result.confidence, 2),
+                    )
+                    self._save_cache(cache_key, decision)
+                    return decision
+
+                # 1.4 Se classificado como Saúde
+                if has_political_fig and (has_speech_verb or has_pol_rhetoric) and not matched_biomedical:
+                    decision = HealthGatekeeperDecision(
+                        is_health_topic=False,
+                        is_political_polemic=True,
+                        allows_verification=False,
+                        category="POLITICAL_POLEMIC",
+                        reason="Declaração de cunho político/retórico atribuída a figura pública. O FactChkBR valida exclusivamente fatos biomédicos e sanitários, excluindo polêmicas político-partidárias.",
+                        matched_signals=matched_health[:4],
+                        detected_topic="Política",
+                        topic_confidence=round(laya_result.probabilities.get("Política", laya_result.confidence), 2),
+                    )
+                    self._save_cache(cache_key, decision)
+                    return decision
+
+                is_biomed = any(
+                    term in norm for term in ("médic", "medicament", "fármac", "rejuvenesc", "rugas", "emagrec", "câncer", "vacina", "vírus", "adesivo", "tratamento", "pele", "doen")
+                )
+                signals = list(dict.fromkeys(matched_health))[:4]
+                decision = HealthGatekeeperDecision(
+                    is_health_topic=True,
+                    is_political_polemic=False,
+                    allows_verification=True,
+                    category="BIOMEDICAL_HEALTH" if is_biomed else "PUBLIC_HEALTH",
+                    reason=f"O texto foi classificado no tema de Saúde ({laya_result.confidence * 100:.1f}% de certeza) com alegações médicas, terapêuticas ou sanitárias passíveis de validação.",
+                    matched_signals=signals,
+                    detected_topic="Saúde",
+                    topic_confidence=round(laya_result.confidence, 2),
+                )
+                self._save_cache(cache_key, decision)
+                return decision
+
+        # 2. Tenta resolução rápida via regras determinísticas (contingência)
         fast_decision = self.evaluate_heuristic(text)
         if fast_decision is not None:
             self._save_cache(cache_key, fast_decision)
             return fast_decision
 
-        # 2. Consulta semântica via LLM (Ollama ou OpenAI)
+        # 3. Consulta semântica via LLM (Ollama ou OpenAI)
         try:
             endpoint = self.settings.get_llm_endpoint()
             model = self.settings.get_llm_model()
@@ -336,6 +454,8 @@ class HealthTopicGatekeeper:
                     category=cat,
                     reason=reason,
                     matched_signals=signals,
+                    detected_topic="Saúde" if is_health else ("Política" if is_pol else "Outros"),
+                    topic_confidence=0.90,
                 )
                 self._save_cache(cache_key, decision)
                 return decision
@@ -357,6 +477,8 @@ class HealthTopicGatekeeper:
                 category="POLITICAL_POLEMIC",
                 reason="Declaração de cunho político atribuída a figura pública (fora do escopo biomédico).",
                 matched_signals=matched_health[:4],
+                detected_topic="Política",
+                topic_confidence=0.80,
             )
         elif matched_health:
             fallback = HealthGatekeeperDecision(
@@ -366,6 +488,8 @@ class HealthTopicGatekeeper:
                 category="BIOMEDICAL_HEALTH",
                 reason="Tema de saúde detectado com sinais biomédicos nas regras de contingência.",
                 matched_signals=matched_health[:4],
+                detected_topic="Saúde",
+                topic_confidence=0.75,
             )
         else:
             fallback = HealthGatekeeperDecision(
@@ -375,6 +499,8 @@ class HealthTopicGatekeeper:
                 category="OUT_OF_SCOPE",
                 reason="Tema não relacionado à saúde biomédica ou sanitária.",
                 matched_signals=[],
+                detected_topic="Outros",
+                topic_confidence=0.70,
             )
 
         self._save_cache(cache_key, fallback)

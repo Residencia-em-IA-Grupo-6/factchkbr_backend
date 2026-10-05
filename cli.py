@@ -44,11 +44,16 @@ def print_step_trace(step_name: str, result: AnalyzerResult, duration: float, ra
         allows = raw.get("allows_verification", False)
         cat = raw.get("category", "OUT_OF_SCOPE")
         signals = raw.get("matched_signals", [])
+        detected_topic = raw.get("detected_topic")
+        topic_conf = raw.get("topic_confidence")
 
         status_icon = "🩺" if allows else "🛑"
         print(f"\n[{now_str}] ── [0/4] {status_icon} FILTRO TEMÁTICO DE SAÚDE ({duration:.3f}s) " + "─" * 29)
         status_str = "APROVADO (Tema de Saúde Válido)" if allows else "BLOQUEADO (Fora do Escopo)"
         print(f"      • Status do Escopo:      {status_str} [Categoria: {cat}]")
+        if detected_topic:
+            conf_str = f" ({topic_conf * 100:.1f}%)" if topic_conf is not None else ""
+            print(f"      • Tema Classificado:     {detected_topic}{conf_str}")
         if signals:
             print(f"      • Sinais Detectados:     {', '.join(signals)}")
         print(f"      • Justificativa:         {result.reasons[0] if result.reasons else result.summary}")

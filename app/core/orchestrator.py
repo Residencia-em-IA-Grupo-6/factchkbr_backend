@@ -100,7 +100,7 @@ class FactCheckOrchestrator:
 
         if not active_map:
             return AnalyzeResponse(
-                claim=text[:100],
+                claim=text.strip(),
                 verdict=Verdict.INCONCLUSIVO,
                 confidence=0.0,
                 summary="Nenhum analisador ativo configurado.",
@@ -124,7 +124,7 @@ class FactCheckOrchestrator:
                     analyzer_name="health_gatekeeper",
                     verdict=Verdict.VERDADEIRO if gate_decision.allows_verification else Verdict.INCONCLUSIVO,
                     confidence=1.0 if gate_decision.allows_verification else 0.0,
-                    claim=text[:120],
+                    claim=text.strip(),
                     reasons=[gate_decision.reason],
                     sources=["Filtro de Escopo Temático FactChkBR (Saúde Pública e Biomedicina)"],
                     raw_details=gate_decision.model_dump(),
@@ -139,7 +139,7 @@ class FactCheckOrchestrator:
                     f"O FactChkBR realiza a validação de informações se e somente se o tema for estritamente relacionado à saúde pública ou biomedicina."
                 )
                 return AnalyzeResponse(
-                    claim=text[:120],
+                    claim=text.strip(),
                     verdict=Verdict.INCONCLUSIVO,
                     confidence=0.0,
                     summary=summary_msg,
@@ -195,7 +195,7 @@ class FactCheckOrchestrator:
                 assertions = (c_res.raw_details or {}).get("assertions", [])
                 if not assertions:
                     return AnalyzeResponse(
-                        claim=text[:120],
+                        claim=text.strip(),
                         verdict=Verdict.INCONCLUSIVO,
                         confidence=0.0,
                         summary="Nenhuma alegação factual identificada (texto classificado como ruído, saudação ou mera opinião).",
@@ -553,7 +553,7 @@ class FactCheckOrchestrator:
             summary = "Extração de features concluída; nenhum modelo decisor emitiu veredito final."
 
         return AnalyzeResponse(
-            claim=primary_claim or text[:120],
+            claim=primary_claim or text.strip(),
             verdict=dominant_verdict,
             confidence=round(final_confidence, 2),
             summary=summary,
