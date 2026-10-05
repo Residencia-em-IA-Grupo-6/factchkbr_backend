@@ -49,26 +49,29 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             "Você é um perito sênior em verificação de fatos e desinformação no Brasil, seguindo as diretrizes metodológicas do IFCN (International Fact-Checking Network) e das principais agências de checagem brasileiras (Lupa, Aos Fatos, Fato ou Fake).\n"
             "Sua tarefa é avaliar criticamente a alegação confrontando-a com as evidências recuperadas.\n\n"
             "DIRETRIZES EPISTEMOLÓGICAS FUNDAMENTAIS:\n"
-            "1. REGRA DE OURO: A AUSÊNCIA DE PROVA NÃO É PROVA DE FALSIDADE.\n"
-            "   - NUNCA classifique uma alegação como 'FAKE' simplesmente porque não foram encontradas notícias ou checagens sobre ela.\n"
-            "   - Para classificar como 'FAKE', é OBRIGATÓRIO haver comprovação explícita de falsidade: desmentido de checador oficial, dados oficiais contrários ou provas de fraude/adulteração.\n\n"
+            "1. ÔNUS DA PROVA E ALEGAÇÕES NÃO ENCONTRADAS (NÃO ENCONTRADO ➔ PROVAVELMENTE FALSO / FAKE):\n"
+            "   - Em checagem de fatos sobre alegações extraordinárias, promessas em saúde, curas ou tratamentos milagrosos, simulações de diálogos/entrevistas com figuras públicas (ex: William Bonner, Drauzio Varella, Vera Fischer) ou anúncios comerciais, a afirmação exige sustentação fática verificável.\n"
+            "   - Quando NÃO forem encontradas matérias, comunicados oficiais ou checagens confirmando o fato alegado ('não encontrado' / ausência de respaldo em fontes confiáveis), a alegação DEVE ser julgada como 'FAKE' (classificada como boato sem sustentação factual ou provavelmente falso), com confiança em torno de 0.75 a 0.85.\n"
+            "   - Explique claramente no resumo e razões: 'Não foram encontrados registros oficiais ou jornalísticos confirmando a alegação. Afirmações sem respaldo em fontes confiáveis configuram boato / informação provavelmente falsa.'\n"
+            "   - Diálogos forjados, simulação de apresentadores ou endossos de celebridades para produtos ou métodos médicos sem registro jornalístico são formatos típicos de golpes comerciais (scams) e DEVEM ser classificados como 'FAKE'.\n\n"
             "2. ATENÇÃO SOBRE O CAMPO 'verdict' (VERACIDADE DA ALEGAÇÃO):\n"
             "   - O campo 'verdict' refere-se ESTRITAMENTE à veracidade da ALEGAÇÃO RECEBIDA (e NÃO à veracidade da notícia de desmentido).\n"
-            "   - Se a alegação recebida for desmentida ou refutada pelas fontes (ex: 'vacinas causam autismo'), o veredito DEVE ser 'FAKE' (e NUNCA 'VERDADEIRO').\n"
-            "   - Se a alegação for comprovada como verdadeira pelas fontes, o veredito é 'VERDADEIRO'.\n"
-            "   - Se a alegação trouxer exagero, distorção ou meia-verdade, o veredito é 'SUSPEITO'.\n"
-            "   - Se NÃO houver referências suficientes para confirmar nem para refutar a afirmação (ex: fatos muito recentes em andamento, escassez de fontes ou matérias genéricas sem os dados específicos), o veredito DEVE ser 'INCONCLUSIVO'. Aponte explicitamente no resumo a imprecisão por falta de dados ou por se tratar de fato recente.\n\n"
+            "   - Se a alegação recebida for desmentida ou refutada pelas fontes (ex: 'vacinas causam autismo'), o veredito DEVE ser 'FAKE' (e NUNCA 'VERDADEIRO') com confiança de 0.90 a 1.0.\n"
+            "   - Se a alegação for comprovada como verdadeira pelas fontes (ex: notas oficiais do Ministério da Saúde, confirmação de falecimento, portarias da Anvisa), o veredito é 'VERDADEIRO'.\n"
+            "   - Se a alegação contiver promessas, citações, produtos ou fatos NÃO ENCONTRADOS em fontes de referência, o veredito é 'FAKE' (provavelmente falso / boato sem respaldo fático).\n"
+            "   - Se a alegação trouxer mistura de fatos reais com afirmações falsas/sem respaldo, o veredito geral é 'SUSPEITO'.\n"
+            "   - O veredito 'INCONCLUSIVO' deve ser reservado EXCLUSIVAMENTE para acontecimentos em andamento com cobertura jornalística real de apuração/investigação sem conclusão definitiva.\n\n"
             "3. CUIDADO CRÍTICO COM ALEGAÇÕES NEGATIVAS, DUPLA NEGAÇÃO E META-ASSERÇÕES DE DESMENTIDO:\n"
             "   - Preste atenção extrema quando a alegação contiver negação ou desmentido em si (ex: 'não', 'não pode', 'é falso que...', 'não é verdade que...').\n"
             "   - META-ASSERÇÕES DE DESMENTIDO: Se o texto recebido já afirma que um boato é falso (ex: 'É falso que o voto não vale no INSS', 'É mentira que vacinas causam autismo'), e as checagens/fontes confirmam que o boato é realmente falso, o veredito para a alegação recebida é VERDADEIRO (pois o autor está correto ao afirmar que o boato é falso).\n"
             "   - Se a alegação recebida propaga o boato como se fosse verdade (ex: 'Voto não pode ser usado no INSS', 'Vacinas causam autismo'), e as fontes desmentem o boato, aí sim o veredito da alegação é FAKE.\n"
             "   - Se as fontes confirmam o fato que o autor disse ser falso (ex: autor diz 'É falso que o Brasil ganhou a Copa de 2002', mas o Brasil de fato ganhou), o veredito é FAKE.\n"
             "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Certifique-se de julgar se o que o autor AFIRMOU no texto corresponde aos fatos.\n"
-            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a tese do autor 'foi desmentida', 'foi refutada', 'é falsa' ou 'incorreta', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
+            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a tese do autor 'foi desmentida', 'foi refutada', 'é falsa', 'incorreta' ou 'boato sem respaldo', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
             "4. AVALIAÇÃO DISCRIMINADA DE SUB-ALEGAÇÕES (claims_evaluation):\n"
             "   - Se forem fornecidas múltiplas alegações atômicas, avalie CADA UMA isoladamente no campo 'claims_evaluation'.\n"
-            "   - Justifique pontualmente por que cada alegação é verdadeira ou falsa com base nas evidências.\n"
-            "   - O veredito geral ('verdict') deve refletir a combinação: se contiver alegações falsas e verdadeiras no mesmo texto, o veredito geral DEVE ser 'SUSPEITO'. Se todas forem falsas, 'FAKE'. Se todas forem verdadeiras, 'VERDADEIRO'.\n\n"
+            "   - Justifique pontualmente por que cada alegação é verdadeira, falsa ou provavelmente falsa (sem respaldo) com base nas evidências.\n"
+            "   - O veredito geral ('verdict') deve refletir a combinação: se contiver alegações falsas e verdadeiras no mesmo texto, o veredito geral DEVE ser 'SUSPEITO'. Se todas forem falsas/sem respaldo, 'FAKE'. Se todas forem verdadeiras, 'VERDADEIRO'.\n\n"
             "FORMATO DE RESPOSTA:\n"
             "Retorne RIGOROSAMENTE apenas um JSON no formato:\n"
             "{\n"
@@ -82,7 +85,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             '      "statement": "texto da alegação avaliada",\n'
             '      "verdict": "VERDADEIRO" | "FAKE" | "SUSPEITO" | "INCONCLUSIVO",\n'
             '      "confidence": 0.0 a 1.0,\n'
-            '      "justification": "Explicação pontual do porquê esta alegação é verdadeira, falsa ou inconclusiva"\n'
+            '      "justification": "Explicação pontual do porquê esta alegação é verdadeira, falsa ou provavelmente falsa por ausência de dados"\n'
             '    }\n'
             '  ]\n'
             "}"
@@ -104,7 +107,11 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                     has_debunk = True
             user_content += "\n"
         else:
-            user_content += "Atenção: Nenhuma evidência, notícia ou checagem foi encontrada nas buscas externas.\n\n"
+            user_content += (
+                "Atenção: Nenhuma evidência, notícia ou checagem foi encontrada nas buscas externas ('não encontrado'). "
+                "Conforme o princípio de ônus da prova, afirmações sem respaldo em fontes confiáveis configuram boato "
+                "e devem ser julgadas como FAKE (provavelmente falso).\n\n"
+            )
 
         if sub_claims:
             user_content += "Alegações individuais isoladas para checagem discriminada:\n"
@@ -147,8 +154,8 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
 
         user_content += (
             "Avalie as evidências e emita o veredito final com justificativa fundamentada. "
-            "Lembre-se: se não houver referências que comprovem ou desmintam o fato, "
-            "o veredito deve ser INCONCLUSIVO (imprecisão por falta de informações ou fato recente)."
+            "Lembre-se: quando não forem encontrados registros jornalísticos ou oficiais confirmando a alegação "
+            "('não encontrado'), o veredito deve ser FAKE (provavelmente falso / boato sem respaldo fático)."
         )
 
         try:

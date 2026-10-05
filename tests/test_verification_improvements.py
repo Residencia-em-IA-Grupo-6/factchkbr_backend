@@ -65,12 +65,12 @@ def test_polarity_stance_detection():
 
 
 def test_epistemological_safeguard_no_debunk_fallback():
-    """Valida que ausência de prova não gera veredito FAKE indevido (deve ser INCONCLUSIVO)."""
+    """Valida que alegações não encontradas em fontes confiáveis são tratadas como FAKE (provavelmente falso)."""
     orchestrator = FactCheckOrchestrator()
     fc_result = AnalyzerResult(
         analyzer_name="fact_check_api",
-        verdict=Verdict.INCONCLUSIVO,
-        confidence=0.50,
+        verdict=Verdict.FAKE,
+        confidence=0.75,
         claim="Novo restaurante abriu na Paulista",
         summary="Nenhuma evidência localizada.",
         reasons=[],
@@ -89,28 +89,29 @@ def test_epistemological_safeguard_no_debunk_fallback():
     )
 
     response = orchestrator._consolidate("Novo restaurante abriu na Paulista", [fc_result, judge_result])
-    assert response.verdict == Verdict.INCONCLUSIVO
-    assert any("Ausência de referências comprobatórias de falsidade" in r for r in response.reasons)
+    assert response.verdict == Verdict.FAKE
+    assert response.confidence >= 0.75
+    assert any("não encontrada" in r.lower() or "ônus da prova" in r.lower() or "provavelmente fals" in r.lower() for r in response.reasons)
 
 
 def test_multi_claim_safeguard_sub_claim_fallback():
-    """Valida que sub-alegações sem desmentido externo não herdam FAKE espúrio."""
+    """Valida que sub-alegações sem respaldo factual são classificadas como FAKE (provavelmente falso)."""
     orchestrator = FactCheckOrchestrator()
     fc_result = AnalyzerResult(
         analyzer_name="fact_check_api",
-        verdict=Verdict.INCONCLUSIVO,
-        confidence=0.55,
+        verdict=Verdict.FAKE,
+        confidence=0.75,
         claim="Texto composto",
-        summary="Varredura inconclusiva.",
+        summary="Varredura sem registros.",
         reasons=[],
         sources=[],
         raw_details={
             "sub_claims": [
                 {
                     "statement": "Brigar não é benéfico",
-                    "verdict": Verdict.INCONCLUSIVO,
-                    "confidence": 0.50,
-                    "justification": "Sem cobertura conclusiva.",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.75,
+                    "justification": "Sem registros jornalísticos ou científicos.",
                     "sources": [],
                 }
             ]
@@ -137,10 +138,10 @@ def test_multi_claim_safeguard_sub_claim_fallback():
     )
 
     response = orchestrator._consolidate("Texto composto", [fc_result, judge_result])
-    assert response.verdict == Verdict.INCONCLUSIVO
+    assert response.verdict == Verdict.FAKE
     assert len(response.sub_claims) == 1
-    assert response.sub_claims[0].verdict == Verdict.INCONCLUSIVO
-    assert "Ausência de referências comprobatórias de falsidade" in response.sub_claims[0].justification
+    assert response.sub_claims[0].verdict == Verdict.FAKE
+    assert any(k in response.sub_claims[0].justification.lower() for k in ("provavelmente falsa", "sem registro", "nenhuma fonte", "não encontrad"))
 
 
 @pytest.mark.asyncio
@@ -243,7 +244,8 @@ def test_adversarial_orchestrator_symmetrical_epistemology():
         raw_details={"sub_claims": []},
     )
     r1 = orchestrator._consolidate("Fato sem evidência", [fc_empty, judge_hallucinated])
-    assert r1.verdict == Verdict.INCONCLUSIVO
+    assert r1.verdict == Verdict.FAKE
+    assert r1.confidence >= 0.70
 
     # 2. Fact-check tem confirmação documental e Judge alucina FAKE com alta confiança
     fc_proven = AnalyzerResult(
@@ -537,5 +539,136 @@ def test_consolidation_preserves_confirmed_verdict_when_evidences_support():
     assert len(resp.sub_claims) == 1
     assert resp.sub_claims[0].verdict == Verdict.VERDADEIRO
     assert "ausência de referências" not in resp.sub_claims[0].justification.lower()
+
+
+@pytest.mark.asyncio
+async def test_heuristic_celebrity_scam_dialogue_detection():
+    """Valida detecção heurística de entrevista/diálogo forjado e apelos de golpe comercial."""
+    from app.analyzers.heuristic import HeuristicAnalyzer
+    analyzer = HeuristicAnalyzer()
+
+    scam_text = (
+        "William Bonner: Boa noite! Hoje vamos explorar um tratamento de rejuvenescimento "
+        "que tem conquistado muitas pessoas. Um dos grandes nomes que aderiu a esse tratamento "
+        "é a icônica Vera Fischer. Recentemente, ela compartilhou sua experiência em uma entrevista. "
+        "Vera Fischer: Em meus 72 anos, decidi me cuidar. Esse tratamento é super tranquilo, "
+        "nada de botox ou cirurgias plásticas. O melhor de tudo: é acessível e cabe no bolso de qualquer mulher. "
+        "Quer saber mais?"
+    )
+
+    result = await analyzer.analyze(scam_text, [])
+    assert result.raw_details["urgency_lexicon_density"] > 0
+    assert result.raw_details["composite_sensationalism_score"] >= 0.20
+    assert any("diálogo/entrevista simulada" in r.lower() or "publicidade fraudulenta" in r.lower() for r in result.reasons)
+    assert any("apelo comercial" in r.lower() or "cura milagrosa" in r.lower() for r in result.reasons)
+
+
+def test_orchestrator_unverified_scam_consolidated_as_fake():
+    """Valida a consolidação de alegação não encontrada em fontes como FAKE (provavelmente falso)."""
+    orchestrator = FactCheckOrchestrator()
+    claim = "Vera Fischer aderiu ao tratamento de rejuvenescimento facial sem botox"
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.FAKE,
+        confidence=0.75,
+        claim=claim,
+        summary="Nenhuma evidência localizada em órgãos oficiais ou grandes veículos.",
+        reasons=[
+            "Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato.",
+            "Alegação não encontrada em fontes oficiais ou veículos confiáveis: sob o princípio de ônus da prova, afirmações públicas ou promessas de tratamento sem qualquer respaldo factual são tratadas como provavelmente falsas.",
+        ],
+        sources=[],
+        raw_details={"evidences": [], "sub_claims": []},
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.FAKE,
+        confidence=0.85,
+        claim=claim,
+        summary="A alegação de endosso por Vera Fischer não possui nenhum registro público em veículos jornalísticos ou notas oficiais, configurando formato clássico de golpe comercial.",
+        reasons=[
+            "Não foram encontrados registros oficiais ou jornalísticos confirmando a alegação.",
+            "Formato típico de publicidade enganosa utilizando figura pública sem consentimento.",
+        ],
+        sources=["LLM Judge (phi3.5)"],
+        raw_details={"sub_claims": []},
+    )
+
+    response = orchestrator._consolidate(claim, [fc_result, judge_result])
+    assert response.verdict == Verdict.FAKE
+    assert response.confidence >= 0.75
+    assert any("ônus da prova" in r.lower() or "não encontrada" in r.lower() or "provavelmente fals" in r.lower() for r in response.reasons)
+
+
+def test_orchestrator_multi_subclaims_unverified_all_fake():
+    """Valida que múltiplas sub-alegações sem lastro resultem em veredito consolidado FAKE (provavelmente falso)."""
+    orchestrator = FactCheckOrchestrator()
+    full_text = "William Bonner e Vera Fischer promovem tratamento de rejuvenescimento"
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.FAKE,
+        confidence=0.75,
+        claim=full_text,
+        summary="Nenhum registro encontrado.",
+        reasons=[],
+        sources=[],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": "William Bonner vai explorar tratamento de rejuvenescimento",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.75,
+                    "justification": "Sem cobertura em veículos jornalísticos.",
+                    "sources": [],
+                    "evidences": [],
+                },
+                {
+                    "statement": "Vera Fischer aderiu a esse tratamento",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.75,
+                    "justification": "Sem registros públicos comprovando a adesão.",
+                    "sources": [],
+                    "evidences": [],
+                },
+            ]
+        },
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.FAKE,
+        confidence=0.85,
+        claim=full_text,
+        summary="Alegações sem respaldo factual.",
+        reasons=[],
+        sources=[],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": "William Bonner vai explorar tratamento de rejuvenescimento",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.85,
+                    "justification": "Declaração inexistente atribuída a William Bonner.",
+                },
+                {
+                    "statement": "Vera Fischer aderiu a esse tratamento",
+                    "verdict": Verdict.FAKE,
+                    "confidence": 0.85,
+                    "justification": "Depoimento forjado atribuído a Vera Fischer.",
+                },
+            ]
+        },
+    )
+
+    response = orchestrator._consolidate(full_text, [fc_result, judge_result])
+    assert response.verdict == Verdict.FAKE
+    assert response.confidence >= 0.75
+    assert len(response.sub_claims) == 2
+    for sc in response.sub_claims:
+        assert sc.verdict == Verdict.FAKE
+
 
 

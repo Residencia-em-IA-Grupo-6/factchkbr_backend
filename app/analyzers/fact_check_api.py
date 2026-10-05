@@ -507,11 +507,11 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         """
         if not evidences:
             return (
-                Verdict.INCONCLUSIVO,
-                0.50,
+                Verdict.FAKE,
+                0.75,
                 [
                     "Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato.",
-                    "Imprecisão por falta de informações: ausência de registros jornalísticos ou oficiais (pode se tratar de acontecimento muito recente ou rumor sem cobertura comprovada).",
+                    "Alegação não encontrada em fontes oficiais ou veículos confiáveis: sob o princípio de ônus da prova, afirmações públicas, promessas de tratamento ou declarações atribuídas sem respaldo factual são tratadas como provavelmente falsas (boato sem sustentação).",
                 ],
             )
 
@@ -670,11 +670,11 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             )
 
         return (
-            Verdict.INCONCLUSIVO,
-            0.50,
+            Verdict.FAKE,
+            0.75,
             [
                 "Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato.",
-                "Imprecisão por falta de informações: ausência de registros jornalísticos ou oficiais (pode se tratar de acontecimento muito recente ou rumor sem cobertura comprovada).",
+                "Alegação não encontrada em fontes oficiais ou veículos confiáveis: sob o princípio de ônus da prova, afirmações públicas, promessas de tratamento ou declarações atribuídas sem respaldo factual são tratadas como provavelmente falsas (boato sem sustentação).",
             ],
         )
 
@@ -701,7 +701,10 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             sources.append(f"{e.source_name}: {e.title}")
 
         if verdict == Verdict.FAKE:
-            justification = reasons[0] if reasons else "Desmentida por fontes e agências de checagem."
+            if reasons and any("não encontrada" in r.lower() for r in reasons):
+                justification = "Alegação sem respaldo em fontes oficiais ou veículos confiáveis (não encontrada / provavelmente falso)."
+            else:
+                justification = reasons[0] if reasons else "Desmentida por fontes e agências de checagem."
         elif verdict == Verdict.VERDADEIRO:
             justification = reasons[0] if reasons else "Confirmada por registros jornalísticos e fontes oficiais."
         elif verdict == Verdict.SUSPEITO:
@@ -757,7 +760,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             avg_conf = sum(r["confidence"] for r in fake_claims + true_claims) / len(fake_claims + true_claims)
             confidence = round(avg_conf, 2)
             summary_reason = (
-                f"Conteúdo misto detectado: {len(fake_claims)} alegação(ões) falsa(s) e "
+                f"Conteúdo misto detectado: {len(fake_claims)} alegação(ões) falsa(s)/sem respaldo e "
                 f"{len(true_claims)} verdadeira(s) identificadas no mesmo texto."
             )
             return verdict, confidence, [summary_reason] + itemized_reasons
@@ -766,7 +769,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         if fake_claims:
             verdict = Verdict.FAKE
             confidence = round(max(r["confidence"] for r in fake_claims), 2)
-            summary_reason = f"Falsidade factual: {len(fake_claims)} alegação(ões) desmentida(s) pelas fontes oficiais/checadores."
+            summary_reason = f"Falsidade factual / boato: {len(fake_claims)} alegação(ões) sem respaldo em fontes confiáveis ou desmentidas."
             return verdict, confidence, [summary_reason] + itemized_reasons
 
         # 3. Se contiver alegações suspeitas -> SUSPEITO

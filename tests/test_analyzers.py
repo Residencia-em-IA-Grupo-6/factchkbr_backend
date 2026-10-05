@@ -379,14 +379,15 @@ def test_fact_check_api_evaluate_verdict_lateral_reading():
 
 
 def test_fact_check_api_empty_evidences():
-    """Garante retorno neutro e inconclusivo na ausência de matérias ou checagens."""
+    """Garante que a ausência de registros resulte em provavelmente falso (ônus da prova)."""
     from app.analyzers.fact_check_api import FactCheckApiAnalyzer
 
     analyzer = FactCheckApiAnalyzer()
     verdict, conf, reasons = analyzer.evaluate_verdict([])
-    assert verdict == Verdict.INCONCLUSIVO
-    assert conf == 0.50
+    assert verdict == Verdict.FAKE
+    assert conf == 0.75
     assert len(reasons) >= 1
+    assert any("não encontrada" in r.lower() or "ônus da prova" in r.lower() for r in reasons)
 
 
 @pytest.mark.asyncio
@@ -470,15 +471,15 @@ def test_select_primary_assertion_with_suggested_primary():
     assert chosen.id == 1
 
 
-def test_orchestrator_inconclusive_safeguard_without_debunk():
-    """Garante que a ausência de referências de desmentido resulte em INCONCLUSIVO (sem falsos FAKE)."""
+def test_orchestrator_unverified_fallback_probably_false():
+    """Garante que alegações sem confirmação em fontes oficiais ou imprensa sejam tratadas como FAKE (provavelmente falso)."""
     orchestrator = FactCheckOrchestrator()
 
-    # Simula resultado de fact_check_api sem evidências de desmentido (INCONCLUSIVO)
+    # Simula resultado de fact_check_api sem evidências
     fc_result = AnalyzerResult(
         analyzer_name="fact_check_api",
-        verdict=Verdict.INCONCLUSIVO,
-        confidence=0.55,
+        verdict=Verdict.FAKE,
+        confidence=0.75,
         claim="Fatoide recente sem cobertura",
         summary="Nenhuma checagem prévia foi encontrada.",
         reasons=["Ausência de registros para este fato."],
@@ -486,7 +487,7 @@ def test_orchestrator_inconclusive_safeguard_without_debunk():
         raw_details={"evidences": []},
     )
 
-    # Simula LLM judge que emitiu FAKE por inferência sem fonte
+    # Simula LLM judge que emitiu FAKE por falta de cobertura fática
     judge_result = AnalyzerResult(
         analyzer_name="llm_judge",
         verdict=Verdict.FAKE,
@@ -498,9 +499,10 @@ def test_orchestrator_inconclusive_safeguard_without_debunk():
     )
 
     response = orchestrator._consolidate("Fatoide recente sem cobertura", [fc_result, judge_result])
-    assert response.verdict == Verdict.INCONCLUSIVO
-    assert any("impedem a classificação como fake" in r.lower() or "ausência de referências" in r.lower() for r in response.reasons)
-    assert any(k in response.summary.lower() for k in ("recente", "insuficiente", "ausência", "dados", "imprecis"))
+    assert response.verdict == Verdict.FAKE
+    assert response.confidence >= 0.75
+    assert any("ônus da prova" in r.lower() or "não encontrada" in r.lower() or "provavelmente falsa" in r.lower() for r in response.reasons)
+
 
 
 def test_fact_check_api_desmentido_rating():

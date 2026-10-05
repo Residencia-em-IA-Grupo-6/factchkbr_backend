@@ -80,7 +80,7 @@ class HeuristicAnalyzer(BaseAnalyzer):
         exclamation_density = text.count("!") / n_sentences
         question_density = text.count("?") / n_sentences
 
-        # 6. Densidade de Léxico de Urgência e Clickbait (do repositório desacoplado)
+        # 6. Densidade de Léxico de Urgência, Clickbait e Golpes Comerciais (do repositório desacoplado)
         urgency_patterns = self.repository.get_urgency_patterns()
         urgency_matches_count = 0
 
@@ -91,13 +91,21 @@ class HeuristicAnalyzer(BaseAnalyzer):
 
         urgency_density = (urgency_matches_count / n_words) if n_words > 0 else 0.0
 
-        # 7. Escore Composto de Sensacionalismo (Ponderação normalizada)
+        # 7. Detecção de Formato de Diálogo Simulado / Atribuição de Entrevista Forjada
+        dialogue_pattern = re.compile(
+            r"(?:^[A-Z][a-záéíóúâêîôûãõç]+(?:\s+[A-Z][a-záéíóúâêîôûãõç]+)+\s*:\s*|\b[A-Z][a-záéíóúâêîôûãõç]+(?:\s+[A-Z][a-záéíóúâêîôûãõç]+)+\s*:\s*(?:boa noite|olá|em meus|confira|veja))",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        dialogue_matches = len(dialogue_pattern.findall(text))
+
+        # 8. Escore Composto de Sensacionalismo e Risco Estilístico (Ponderação normalizada)
         raw_score = (
-            0.20 * min(uppercase_ratio * 3.0, 1.0)
-            + 0.25 * min(allcaps_words_ratio * 4.0, 1.0)
-            + 0.20 * min(excessive_punc * 0.25, 1.0)
-            + 0.15 * min(exclamation_density * 0.5, 1.0)
-            + 0.20 * min(urgency_density * 5.0, 1.0)
+            0.15 * min(uppercase_ratio * 3.0, 1.0)
+            + 0.20 * min(allcaps_words_ratio * 4.0, 1.0)
+            + 0.15 * min(excessive_punc * 0.25, 1.0)
+            + 0.10 * min(exclamation_density * 0.5, 1.0)
+            + 0.25 * min(urgency_density * 5.0, 1.0)
+            + 0.15 * min(dialogue_matches * 0.5, 1.0)
         )
 
         return {
@@ -118,7 +126,18 @@ class HeuristicAnalyzer(BaseAnalyzer):
         """
         metrics = self.extract_features(text)
 
+        # Detecta diálogo simulado para enriquecer as razões e detalhes
+        dialogue_pattern = re.compile(
+            r"(?:^[A-Z][a-záéíóúâêîôûãõç]+(?:\s+[A-Z][a-záéíóúâêîôûãõç]+)+\s*:\s*|\b[A-Z][a-záéíóúâêîôûãõç]+(?:\s+[A-Z][a-záéíóúâêîôûãõç]+)+\s*:\s*(?:boa noite|olá|em meus|confira|veja))",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        dialogue_matches = len(dialogue_pattern.findall(text))
+
         reasons: list[str] = []
+        if dialogue_matches > 0:
+            reasons.append(
+                "Presença de estrutura de diálogo/entrevista simulada (atribuição direta de falas a figuras públicas, formato frequente em golpes e publicidade fraudulenta)."
+            )
         if metrics["allcaps_words_ratio"] > 0.15:
             reasons.append(
                 f"Uso acentuado de palavras em caixa alta ({int(metrics['allcaps_words_ratio'] * 100)}%), indicando ênfase visual atípica."
@@ -129,7 +148,7 @@ class HeuristicAnalyzer(BaseAnalyzer):
             )
         if metrics["urgency_lexicon_density"] > 0.0:
             reasons.append(
-                "Detecção de termos apelativos ou gatilhos de urgência comuns em desinformação."
+                "Detecção de termos apelativos, gatilhos de urgência ou fórmulas de apelo comercial/cura milagrosa."
             )
         if metrics["exclamation_density"] > 1.0:
             reasons.append(

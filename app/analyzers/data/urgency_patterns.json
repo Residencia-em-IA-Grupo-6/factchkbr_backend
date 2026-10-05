@@ -169,6 +169,30 @@
       "category": "teoria_conspiratoria",
       "severity": 0.95,
       "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_22",
+      "label": "diálogo simulado/entrevista forjada",
+      "regex": "\\b(?:[A-Z][a-záéíóúâêîôûãõç]+\\s+){1,3}[A-Z][a-záéíóúâêîôûãõç]+\\s*:\\s*(?:boa noite|olá|em meus|confira|veja|doutor|doutora|recentemente)\\b",
+      "category": "golpe_ou_publicidade_enganosa",
+      "severity": 0.9,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_23",
+      "label": "apelo comercial/golpe estético/rejuvenescimento",
+      "regex": "\\b(?:cabe no bolso|quer saber mais|sem botox|sem cirurgia[s]?|sem pl[aá]stica|tratamento de rejuvenescimento|bigode chin[eê]s|rejuvenescimento milagroso)\\b",
+      "category": "golpe_ou_publicidade_enganosa",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
+    },
+    {
+      "id": "urg_24",
+      "label": "falso endosso/depoimento comercial",
+      "regex": "\\b(?:aderiu a esse tratamento|compartilhou sua experi[eê]ncia|transformando sua autoestima|transformou minha autoestima|segredo revelado)\\b",
+      "category": "golpe_ou_publicidade_enganosa",
+      "severity": 0.85,
+      "source": "FACTCKBR_saude"
     }
   ]
 }
