@@ -240,9 +240,10 @@ class FactCheckOrchestrator:
         fc_sub_claims = (fc_res.raw_details or {}).get("sub_claims", []) if fc_res else []
         judge_sub_claims = (judge_res.raw_details or {}).get("sub_claims", []) if judge_res else []
 
-        # Salvaguarda epistemológica: Ausência de evidência não é evidência de falsidade.
-        # Verifica se há desmentido factual comprovado nas evidências globais ou sub-alegações
+        # Salvaguardas epistemológicas: Ausência de evidência não é evidência de falsidade nem de veracidade.
+        # Verifica se há desmentido factual ou confirmação comprovada nas evidências globais ou sub-alegações
         has_debunk = False
+        has_confirm = False
         if fc_res:
             evidences = (fc_res.raw_details or {}).get("evidences", [])
             has_debunk = (
@@ -254,6 +255,19 @@ class FactCheckOrchestrator:
                 )
                 or any(
                     sc.get("verdict") in (Verdict.FAKE, "FAKE")
+                    for sc in fc_sub_claims
+                )
+            )
+            has_confirm = (
+                fc_res.verdict == Verdict.VERDADEIRO
+                or any(
+                    (e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado")
+                     or e.get("stance") == "SUPPORTS")
+                    and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
+                    for e in evidences
+                )
+                or any(
+                    sc.get("verdict") in (Verdict.VERDADEIRO, "VERDADEIRO")
                     for sc in fc_sub_claims
                 )
             )
@@ -283,22 +297,34 @@ class FactCheckOrchestrator:
                 if isinstance(sub_v, str):
                     sub_v = Verdict[sub_v.upper()] if sub_v.upper() in Verdict.__members__ else Verdict.INCONCLUSIVO
 
-                # Verifica se a sub-alegação tem comprovação de desmentido em fontes factuais
+                # Verifica se a sub-alegação tem comprovação de desmentido ou confirmação em fontes factuais
                 f_debunk = False
+                f_confirm = False
                 if f_match:
                     f_v = f_match.get("verdict")
                     if isinstance(f_v, str):
                         f_v = Verdict[f_v.upper()] if f_v.upper() in Verdict.__members__ else Verdict.INCONCLUSIVO
                     f_debunk = (f_v == Verdict.FAKE)
-                    if not f_debunk and f_match.get("evidences"):
+                    f_confirm = (f_v == Verdict.VERDADEIRO)
+
+                    f_evs = f_match.get("evidences", [])
+                    if not f_debunk and f_evs:
                         f_debunk = any(
                             e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
                             or e.get("stance") == "REFUTES"
-                            for e in f_match.get("evidences", [])
+                            for e in f_evs
+                        )
+                    if not f_confirm and f_evs:
+                        f_confirm = any(
+                            (e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado")
+                             or e.get("stance") == "SUPPORTS")
+                            and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
+                            for e in f_evs
                         )
 
                 if len(base_sub_claims) == 1:
                     f_debunk = f_debunk or has_debunk
+                    f_confirm = f_confirm or has_confirm
 
                 # Determina confiança
                 sub_c = 0.80
@@ -318,14 +344,20 @@ class FactCheckOrchestrator:
                 else:
                     sub_just = item.get("justification", "Avaliação individual.")
 
-                # Salvaguarda epistemológica no nível de cada proposição:
-                # Se o avaliador apontou FAKE mas não há evidência/desmentido factual, reverte para INCONCLUSIVO
+                # Salvaguardas epistemológicas no nível de cada proposição:
                 if sub_v == Verdict.FAKE and not f_debunk:
                     sub_v = Verdict.INCONCLUSIVO
                     sub_c = 0.55
                     sub_just = (
                         f"{sub_just.rstrip('.')} — Ausência de referências comprobatórias de falsidade; "
                         f"classificado como inconclusivo por carência de dados ou fato recente."
+                    )
+                elif sub_v == Verdict.VERDADEIRO and not f_confirm:
+                    sub_v = Verdict.INCONCLUSIVO
+                    sub_c = 0.55
+                    sub_just = (
+                        f"{sub_just.rstrip('.')} — Ausência de referências comprobatórias de confirmação; "
+                        f"classificado como inconclusivo por falta de cobertura oficial ou jornalística."
                     )
 
                 # Determina fontes
@@ -349,30 +381,51 @@ class FactCheckOrchestrator:
                 filtered_reasons.append(f"[Alegação {idx+1} - {sub_v_name}]: \"{stmt}\" ➔ {sub_just}")
 
         if verdict_bearing_results:
-            conclusive = [r for r in verdict_bearing_results if r.verdict != Verdict.INCONCLUSIVO]
-            if conclusive:
-                best_result = max(conclusive, key=lambda r: r.confidence)
-                if best_result.verdict == Verdict.FAKE and not has_debunk:
-                    dominant_verdict = Verdict.INCONCLUSIVO
-                    final_confidence = 0.60
-                    filtered_reasons.append(
-                        "Ausência de referências comprobatórias de falsidade: a carência de dados ou matérias recentes impede a classificação como fake."
-                    )
-                else:
-                    dominant_verdict = best_result.verdict
-                    final_confidence = best_result.confidence
+            # 1. Filtra vereditos conclusivos com lastro probatório (salvaguarda epistemológica simétrica)
+            valid_conclusive: list[AnalyzerResult] = []
+            for r in verdict_bearing_results:
+                if r.verdict == Verdict.INCONCLUSIVO:
+                    continue
+                # Se alega FAKE mas não há desmentido factual registrado nas fontes externas
+                if r.verdict == Verdict.FAKE and not has_debunk:
+                    continue
+                # Se alega VERDADEIRO mas não há confirmação documental/oficial
+                if r.verdict == Verdict.VERDADEIRO and not has_confirm:
+                    continue
+                valid_conclusive.append(r)
 
-                # Salvaguarda contra falso-verdadeiro: checagens oficiais de desmentido prevalecem sobre alucinações de VERDADEIRO
-                if has_debunk and fc_res and fc_res.verdict == Verdict.FAKE and dominant_verdict == Verdict.VERDADEIRO:
-                    logger.warning("Conflito detectado: fact_check_api possui desmentido comprovado mas decisor apontou VERDADEIRO. Prevalecendo FAKE.")
+            if valid_conclusive:
+                # Prevalência de checagem oficial: se há desmentido comprovado no fact_check_api, prevalece FAKE
+                if has_debunk and fc_res and fc_res.verdict == Verdict.FAKE:
                     dominant_verdict = Verdict.FAKE
                     final_confidence = max(fc_res.confidence, 0.85)
                     filtered_reasons.append(
                         "Prevalência de checagem oficial: fontes jornalísticas/IFCN de desmentido têm precedência probatória sobre confirmação divergente."
                     )
+                # Prevalência de comprovação oficial: se há confirmação documental e o outro decisor não tem desmentido
+                elif has_confirm and fc_res and fc_res.verdict == Verdict.VERDADEIRO and not has_debunk:
+                    dominant_verdict = Verdict.VERDADEIRO
+                    final_confidence = fc_res.confidence
+                    filtered_reasons.append(
+                        "Confirmação por fontes oficiais e órgãos de referência com base documental comprovada."
+                    )
+                else:
+                    best_result = max(valid_conclusive, key=lambda r: r.confidence)
+                    dominant_verdict = best_result.verdict
+                    final_confidence = best_result.confidence
             else:
                 dominant_verdict = Verdict.INCONCLUSIVO
-                final_confidence = sum(r.confidence for r in verdict_bearing_results) / len(verdict_bearing_results)
+                final_confidence = 0.55
+                any_fake = any(r.verdict == Verdict.FAKE for r in verdict_bearing_results)
+                any_true = any(r.verdict == Verdict.VERDADEIRO for r in verdict_bearing_results)
+                if any_fake:
+                    filtered_reasons.append(
+                        "Ausência de referências comprobatórias de falsidade: a carência de dados ou matérias recentes impede a classificação como fake."
+                    )
+                if any_true and not any_fake:
+                    filtered_reasons.append(
+                        "Ausência de referências comprobatórias de confirmação: a carência de fontes oficiais ou matérias de referência impede a validação como verdadeiro."
+                    )
 
             # Impacto composto no veredito se houver múltiplas sub-alegações consolidadas
             if len(consolidated_sub_claims) > 1:

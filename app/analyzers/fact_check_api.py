@@ -80,17 +80,36 @@ TRUSTED_MEDIA_DOMAINS = {
     "gov.br": "Portal Gov.br / Órgão Oficial",
 }
 
-TIER1_IDENTIFIERS = {
-    "lupa", "aosfatos", "aos fatos", "boatos.org", "boatos", "comprova", "afp", "checamos",
-    "estadao verifica", "fato ou fake", "confere", "uol confere",
-    "gov.br", "anvisa", "fiocruz", "ibge", "ipea", "saude.gov", "tse.jus.br", "stf.jus.br",
-    "planalto.gov.br", "senado.leg.br", "camara.leg.br", "who.int", "paho.org", "cdc.gov",
-    "who", "opas", "oms", "tribunal superior eleitoral", "stf", "tse",
+TIER1_HOST_SUFFIXES = (
+    ".gov.br", ".leg.br", ".jus.br", ".mil.br",
+    "gov.br", "senado.leg.br", "camara.leg.br", "tse.jus.br", "stf.jus.br", "planalto.gov.br",
+    "anvisa.gov.br", "fiocruz.br", "ibge.gov.br", "ipea.gov.br", "saude.gov.br",
+    "aosfatos.org", "lupa.news", "boatos.org", "projetocomprova.com.br",
+    "who.int", "paho.org", "cdc.gov",
+)
+
+TIER2_HOST_SUFFIXES = (
+    "g1.globo.com", "globo.com", "folha.uol.com.br", "folha.com.br",
+    "estadao.com.br", "uol.com.br", "bbc.com", "bbc.co.uk",
+    "cnnbrasil.com.br", "cnn.com", "reuters.com", "agenciabrasil.ebc.com.br",
+    "ebc.com.br", "valor.globo.com", "valorinveste.globo.com",
+    "nexojornal.com.br", "metropoles.com", "terra.com.br",
+    "dw.com", "elpais.com",
+)
+
+TIER1_SOURCE_NAMES = {
+    "agência lupa", "lupa", "aos fatos", "boatos.org", "boatos",
+    "projeto comprova", "comprova", "afp checamos", "checamos",
+    "fato ou fake", "estadao verifica", "estadão verifica", "uol confere", "confere",
+    "ministério da saúde", "anvisa", "fiocruz", "ibge", "ipea",
+    "tribunal superior eleitoral", "tse", "supremo tribunal federal", "stf",
+    "organização mundial da saúde", "oms", "who", "opas",
 }
 
-TIER2_IDENTIFIERS = {
-    "g1", "globo", "folha", "estadao", "uol", "bbc", "cnnbrasil", "cnn", "reuters",
-    "agenciabrasil", "ebc", "valor", "nexojornal", "metropoles", "elpais", "dw.com", "terra",
+TIER2_SOURCE_NAMES = {
+    "g1", "o globo", "globo", "folha de s.paulo", "folha", "estadão", "estadao",
+    "uol", "bbc news brasil", "bbc", "cnn brasil", "cnn", "reuters",
+    "agência brasil", "ebc", "valor econômico", "nexo jornal", "metrópoles", "metropoles", "terra",
 }
 
 STOP_WORDS_PT = {
@@ -116,32 +135,89 @@ DEBUNK_TITLE_PATTERNS = re.compile(
     r"é falso|é mentira|é fake|é boato|não é verdade|desmente|desmentiu|nega|negou|"
     r"boato|fake news|falso|falsa|engana|enganosa|distorce|distorcida|"
     r"não causou|não causa|não causam|não mata|não matam|"
-    r"não t[eê]m? relação|não há relação|não provocam?|golpe|falso que"
+    r"não t[eê]m? relação|não há relação|não provocam?|"
+    r"golpe do|golpe da|é golpe|trata-se de golpe|caiu no golpe|alerta de golpe|falso que"
     r")\b",
     re.IGNORECASE,
 )
 
 CONFIRM_TITLE_PATTERNS = re.compile(
-    r"\b(?:confirma|confirmou|aprova|aprovou|autoriza|autorizou|determina|proíbe|proibiu|"
-    r"suspende|suspendeu|recolhe|recolhimento|anuncia|anunciou|sanciona|sancionou|publica|publicou)\b",
+    r"\b(?:"
+    r"confirma|confirmou|aprova|aprovou|autoriza|autorizou|determina|determinou|"
+    r"proíbe|proibiu|suspende|suspendeu|recolhe|recolhimento|anuncia|anunciou|"
+    r"sanciona|sancionou|publica|publicou|pode ser utilizad[oa]|passa a valer|"
+    r"passam a valer|servirá como|valerá como|é verdade|é fato|comprova|comprovou"
+    r")\b",
     re.IGNORECASE,
 )
 
 
+def clean_reviewed_claim(text: str) -> str:
+    """Remove prefixos jornalísticos comuns de checagem para isolar o núcleo da alegação."""
+    cleaned = re.sub(
+        r"^(?:(?:fato ou fake|uol confere|comprova|estadao verifica|estadão verifica|aos fatos|lupa|afp checamos|afp|boatos\.org)\s*[:\-]\s*)?",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(?:não é verdade que|é falso que|é mentira que|é fake que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
+        "",
+        cleaned.strip(),
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+TIER1_FACT_CHECK_NAMES = {
+    "agência lupa", "lupa", "aos fatos", "boatos.org", "boatos",
+    "projeto comprova", "comprova", "afp checamos", "checamos",
+    "fato ou fake", "estadao verifica", "estadão verifica", "uol confere", "confere",
+}
+
+
 def get_source_tier(source_name: str, url: str = "", is_fact_check: bool = False) -> SourceTier:
     """Classifica a credibilidade da fonte em tiers baseados na tipologia da fonte."""
-    s_lower = source_name.lower()
-    u_lower = url.lower()
     if is_fact_check:
         return SourceTier.TIER1_OFFICIAL_OR_IFCN
-    for t1 in TIER1_IDENTIFIERS:
-        if t1 in s_lower or t1 in u_lower:
+
+    host = ""
+    if url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.netloc or "").lower().split(":")[0]
+        except Exception:
+            host = ""
+
+    # Rejeita plataformas de blogs gratuitos ou domínios não confiáveis
+    if host and any(host.endswith(b) for b in ("blogspot.com", "wordpress.com", "wixsite.com")):
+        return SourceTier.UNKNOWN
+
+    # 1. Agências de fact-checking IFCN reconhecidas (mesmo hospedadas em portais parceiros como Folha, UOL, etc.)
+    s_clean = re.sub(r"[^\w\s]", "", source_name.lower()).strip()
+    if any(s_clean == fc or re.search(rf"\b{re.escape(fc)}\b", s_clean) for fc in TIER1_FACT_CHECK_NAMES):
+        return SourceTier.TIER1_OFFICIAL_OR_IFCN
+
+    # 2. Validação por domínio qualificado (evita spoofing por substring no path ou query)
+    if host:
+        if any(host == d or host.endswith("." + d) for d in TIER1_HOST_SUFFIXES):
             return SourceTier.TIER1_OFFICIAL_OR_IFCN
-    for t2 in TIER2_IDENTIFIERS:
-        if t2 in s_lower or t2 in u_lower:
+        if any(host == d or host.endswith("." + d) for d in TIER2_HOST_SUFFIXES):
             return SourceTier.TIER2_MAINSTREAM_MEDIA
-    if any(k in u_lower for k in (".com.br", ".org", ".gov", ".edu", ".net.br")):
-        return SourceTier.TIER3_GENERAL_MEDIA
+
+        # Se a URL existe mas não pertence aos domínios confiáveis oficiais/IFCN, classifica como Tier 3 se TLD jornalístico
+        if any(host.endswith(tld) for tld in (".com.br", ".org.br", ".edu.br", ".net.br")):
+            return SourceTier.TIER3_GENERAL_MEDIA
+        return SourceTier.UNKNOWN
+
+    # 3. Validação por nome de fonte reconhecida quando URL não fornecida (ex: mocks de teste)
+    for t1 in TIER1_SOURCE_NAMES:
+        if s_clean == t1 or re.search(rf"\b{re.escape(t1)}\b", s_clean):
+            return SourceTier.TIER1_OFFICIAL_OR_IFCN
+    for t2 in TIER2_SOURCE_NAMES:
+        if s_clean == t2 or re.search(rf"\b{re.escape(t2)}\b", s_clean):
+            return SourceTier.TIER2_MAINSTREAM_MEDIA
+
     return SourceTier.UNKNOWN
 
 
@@ -161,16 +237,30 @@ def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
         return True
     ev_tokens = set(extract_substantive_tokens(evidence_text))
 
+    def _token_match(ct: str, et: str) -> bool:
+        if ct == et:
+            return True
+        # Variações flexionais comuns (plural / singular / gênero) com raiz idêntica
+        if len(ct) >= 4 and len(et) >= 4:
+            if ct.startswith(et) or et.startswith(ct):
+                return abs(len(ct) - len(et)) <= 2
+            if len(ct) >= 5 and len(et) >= 5 and ct[:5] == et[:5]:
+                return abs(len(ct) - len(et)) <= 2
+        return False
+
     matches = 0
     for ct in claim_tokens:
-        if ct in ev_tokens or any(ct[:4] == et[:4] for et in ev_tokens if len(ct) >= 4 and len(et) >= 4):
+        if any(_token_match(ct, et) for et in ev_tokens):
             matches += 1
 
-    if len(claim_tokens) <= 2:
-        return matches >= len(claim_tokens)
-    if len(claim_tokens) <= 4:
-        return matches >= 2
-    return matches >= 3 or (matches / len(claim_tokens)) >= 0.40
+    n_tokens = len(claim_tokens)
+    if n_tokens <= 2:
+        return matches >= n_tokens
+    if n_tokens == 3:
+        return matches >= 3
+    if n_tokens == 4:
+        return matches >= 3
+    return (matches / n_tokens) >= 0.50
 
 
 @register_analyzer("fact_check_api", weight=1.5)
@@ -424,13 +514,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 is_misleading = any(k in r_lower for k in ("enganoso", "distorcido", "fora de contexto", "impreciso", "exagerado"))
 
                 # Remove prefixos jornalísticos de desmentido para avaliar a polaridade real da tese apurada
-                raw_rev = (ev.claim_reviewed or ev.title or "").strip()
-                clean_rev = re.sub(
-                    r"^(?:não é verdade que|é falso que|é mentira que|boato de que|falso que|desmentido:?)\s*",
-                    "",
-                    raw_rev,
-                    flags=re.IGNORECASE,
-                )
+                clean_rev = clean_reviewed_claim(ev.claim_reviewed or ev.title or "")
                 rev_has_neg = bool(NEGATION_PATTERNS.search(clean_rev))
                 same_polarity = (claim_has_neg == rev_has_neg)
 
@@ -461,20 +545,26 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             has_debunk = bool(DEBUNK_TITLE_PATTERNS.search(ev.title))
             has_confirm = bool(CONFIRM_TITLE_PATTERNS.search(ev.title))
 
+            clean_title = clean_reviewed_claim(ev.title)
+            title_has_neg = bool(NEGATION_PATTERNS.search(clean_title))
+            same_polarity = (claim_has_neg == title_has_neg)
+            if not claim:
+                same_polarity = True
+
             if has_debunk:
-                if claim_has_neg:
-                    ev.stance = "SUPPORTS"
-                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirma inexistência/desmentido em \"{ev.title}\"."))
-                else:
+                if same_polarity:
                     ev.stance = "REFUTES"
                     refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): aponta desmentido ou contestação na matéria \"{ev.title}\"."))
-            elif has_confirm:
-                if claim_has_neg:
-                    ev.stance = "REFUTES"
-                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirma ocorrência refutando negação em \"{ev.title}\"."))
                 else:
                     ev.stance = "SUPPORTS"
+                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): desmente a tese contrária em \"{ev.title}\"."))
+            elif has_confirm:
+                if same_polarity:
+                    ev.stance = "SUPPORTS"
                     supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação de atos ou ocorrência em \"{ev.title}\"."))
+                else:
+                    ev.stance = "REFUTES"
+                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação da tese oposta em \"{ev.title}\"."))
             else:
                 ev.stance = "NEUTRAL"
 

@@ -475,7 +475,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
     async def extract_contract(self, text: str) -> ClaimExtractionContract:
         """Executa o pipeline (spaCy -> LLM) e produz o contrato estrito Pydantic."""
         cleaned = self.preprocessor.clean_text(text)
-        entities, is_viable = self.preprocessor.analyze(cleaned)
+        entities, is_viable = await asyncio.to_thread(self.preprocessor.analyze, cleaned)
 
         # Camada 1 (Gatekeeper spaCy): Se não houver estrutura mínima factual, descarta antecipadamente
         if not is_viable:
@@ -496,7 +496,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
         # Fallback de resiliência: se o LLM falhou/está indisponível mas a oração é viável pelo spaCy
         if not assertions and is_viable:
             logger.info("LLM indisponível para decomposição. Ativando fallback sintático estruturado do spaCy.")
-            triple_dict = self.preprocessor.extract_syntactic_triple(cleaned)
+            triple_dict = await asyncio.to_thread(self.preprocessor.extract_syntactic_triple, cleaned)
             fallback_assertion = AtomicAssertion(
                 id=1,
                 statement=cleaned,
