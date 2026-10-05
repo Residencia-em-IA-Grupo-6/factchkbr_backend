@@ -178,10 +178,10 @@ async def test_orchestrator_early_exit_on_political_health_polemic():
     await orchestrator.aclose()
 
 
-def test_laya_topic_classifier_direct():
-    """Valida a inferência direta do LayaTopicClassifier para as principais categorias."""
-    from app.services.laya_classifier import get_laya_classifier
-    clf = get_laya_classifier()
+def test_plumb_topic_classifier_direct():
+    """Valida a inferência direta do PlumbTopicClassifier para as principais categorias."""
+    from app.services.plumb_classifier import get_plumb_classifier
+    clf = get_plumb_classifier()
 
     # 1. Saúde (mesmo sem estar no dicionário léxico tradicional)
     res_mounjaro = clf.classify("Adesivo Mounjaro - emagrecimento rápido sem passar fome")
@@ -215,10 +215,10 @@ def test_laya_topic_classifier_direct():
 
 
 @pytest.mark.asyncio
-async def test_gatekeeper_laya_evaluates_mounjaro_ad(gatekeeper: HealthTopicGatekeeper):
+async def test_gatekeeper_plumb_evaluates_mounjaro_ad(gatekeeper: HealthTopicGatekeeper):
     """
     Garante que anúncios de produtos de saúde/emagrecimento (como adesivo Mounjaro)
-    são aprovados pelo classificador Laya, corrigindo o falso-bloqueio léxico anterior.
+    são aprovados pelo classificador Plumb-4B, corrigindo o falso-bloqueio léxico anterior.
     """
     text = (
         "Adesivo Mounjaro – Faça o teste Conheça o adesivo preferido das famosas. "
@@ -233,7 +233,7 @@ async def test_gatekeeper_laya_evaluates_mounjaro_ad(gatekeeper: HealthTopicGate
 
 
 @pytest.mark.asyncio
-async def test_gatekeeper_laya_blocks_sports_and_entertainment(gatekeeper: HealthTopicGatekeeper):
+async def test_gatekeeper_plumb_blocks_sports_and_entertainment(gatekeeper: HealthTopicGatekeeper):
     """
     Garante que textos de esportes e entretenimento são bloqueados com justificativa informativa.
     """

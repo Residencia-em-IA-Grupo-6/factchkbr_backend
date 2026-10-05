@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
+from app.services.plumb_classifier import PlumbTopicClassifier, get_plumb_classifier
 from app.services.laya_classifier import LayaTopicClassifier, get_laya_classifier
 
 logger = logging.getLogger("factchkbr.core.health_gatekeeper")
@@ -209,6 +210,7 @@ class HealthTopicGatekeeper:
         self,
         http_client: httpx.AsyncClient | None = None,
         settings: Settings | None = None,
+        plumb_classifier: Any = None,
         laya_classifier: Any = None,
     ) -> None:
         self.settings = settings or get_settings()
@@ -217,15 +219,17 @@ class HealthTopicGatekeeper:
             timeout=10.0,
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
-        if laya_classifier is not None:
-            self.laya_classifier = laya_classifier
-        elif getattr(self.settings, "LAYA_ENABLED", True):
-            self.laya_classifier = LayaTopicClassifier(
-                model_name=getattr(self.settings, "LAYA_MODEL_NAME", "convaiinnovations/laya"),
-                subfolder=getattr(self.settings, "LAYA_SUBFOLDER", "multilingual"),
+        classifier_inst = plumb_classifier or laya_classifier
+        if classifier_inst is not None:
+            self.plumb_classifier = classifier_inst
+        elif getattr(self.settings, "PLUMB_ENABLED", True) or getattr(self.settings, "LAYA_ENABLED", False):
+            self.plumb_classifier = PlumbTopicClassifier(
+                model_name=getattr(self.settings, "PLUMB_MODEL_NAME", "crh225/plumb-4b"),
+                device=getattr(self.settings, "PLUMB_DEVICE", "mps"),
             )
         else:
-            self.laya_classifier = None
+            self.plumb_classifier = None
+        self.laya_classifier = self.plumb_classifier
 
     async def aclose(self) -> None:
         if self._owned_client:
@@ -301,7 +305,7 @@ class HealthTopicGatekeeper:
     async def evaluate(self, text: str) -> HealthGatekeeperDecision:
         """
         Executa a validação de escopo temático com cache LRU:
-        1. Classificação temática via Laya (NLP Multilíngue não-autoregressivo).
+        1. Classificação temática via Plumb-4B (Decision-Making via JevK5).
         2. Fast-path heurístico em CPU (0ms) como contingência.
         3. Classificação semântica via LLM para casos com nuances ou declarações mistas.
         """
@@ -323,10 +327,11 @@ class HealthTopicGatekeeper:
         if biomedical_regex_matches:
             matched_biomedical.extend(biomedical_regex_matches)
 
-        # 1. Classificação Temática via Laya (se ativo)
-        if self.laya_classifier is not None:
-            laya_result = await self.laya_classifier.classify_async(text)
-            if laya_result is not None:
+        # 1. Classificação Temática via Plumb-4B (se ativo)
+        classifier = getattr(self, "plumb_classifier", None) or getattr(self, "laya_classifier", None)
+        if classifier is not None:
+            plumb_result = await classifier.classify_async(text)
+            if plumb_result is not None:
                 # 1.1 Salvaguarda biomédica expressa:
                 # Se o texto contém termos biomédicos estritos (ex: vacina, dengue, câncer, remédio)
                 if matched_biomedical:
@@ -339,37 +344,37 @@ class HealthTopicGatekeeper:
                         reason=f"Texto contém alegação médica/sanitária substantiva passível de validação científica ({signals[0]}).",
                         matched_signals=signals,
                         detected_topic="Saúde",
-                        topic_confidence=round(max(laya_result.health_probability, 0.85), 2),
+                        topic_confidence=round(max(plumb_result.health_probability, 0.85), 2),
                     )
                     self._save_cache(cache_key, decision)
                     return decision
 
                 # 1.2 Se classificado como Política
-                if laya_result.topic == "Política":
+                if plumb_result.topic == "Política":
                     decision = HealthGatekeeperDecision(
                         is_health_topic=False,
                         is_political_polemic=True,
                         allows_verification=False,
                         category="POLITICAL_POLEMIC",
-                        reason=f"Texto classificado no tema de Política ({laya_result.confidence * 100:.1f}% de certeza). O FactChkBR valida exclusivamente alegações factuais sobre saúde pública e biomedicina, excluindo debates político-partidários.",
+                        reason=f"Texto classificado no tema de Política ({plumb_result.confidence * 100:.1f}% de certeza). O FactChkBR valida exclusivamente alegações factuais sobre saúde pública e biomedicina, excluindo debates político-partidários.",
                         matched_signals=matched_health[:4],
                         detected_topic="Política",
-                        topic_confidence=round(laya_result.confidence, 2),
+                        topic_confidence=round(plumb_result.confidence, 2),
                     )
                     self._save_cache(cache_key, decision)
                     return decision
 
                 # 1.3 Se classificado em outro tema fora de escopo (Entretenimento, Esportes, Economia, Outros)
-                if laya_result.topic in ("Entretenimento", "Esportes", "Economia", "Outros"):
+                if plumb_result.topic in ("Entretenimento", "Esportes", "Economia", "Outros"):
                     decision = HealthGatekeeperDecision(
                         is_health_topic=False,
                         is_political_polemic=False,
                         allows_verification=False,
                         category="OUT_OF_SCOPE",
-                        reason=f"O tema principal identificado foi '{laya_result.topic}' ({laya_result.confidence * 100:.1f}% de certeza). O FactChkBR realiza a validação de informações se e somente se o tema for estritamente relacionado à saúde pública ou biomedicina.",
+                        reason=f"O tema principal identificado foi '{plumb_result.topic}' ({plumb_result.confidence * 100:.1f}% de certeza). O FactChkBR realiza a validação de informações se e somente se o tema for estritamente relacionado à saúde pública ou biomedicina.",
                         matched_signals=matched_health[:4],
-                        detected_topic=laya_result.topic,
-                        topic_confidence=round(laya_result.confidence, 2),
+                        detected_topic=plumb_result.topic,
+                        topic_confidence=round(plumb_result.confidence, 2),
                     )
                     self._save_cache(cache_key, decision)
                     return decision
@@ -384,7 +389,7 @@ class HealthTopicGatekeeper:
                         reason="Declaração de cunho político/retórico atribuída a figura pública. O FactChkBR valida exclusivamente fatos biomédicos e sanitários, excluindo polêmicas político-partidárias.",
                         matched_signals=matched_health[:4],
                         detected_topic="Política",
-                        topic_confidence=round(laya_result.probabilities.get("Política", laya_result.confidence), 2),
+                        topic_confidence=round(plumb_result.probabilities.get("Política", plumb_result.confidence), 2),
                     )
                     self._save_cache(cache_key, decision)
                     return decision
@@ -398,10 +403,10 @@ class HealthTopicGatekeeper:
                     is_political_polemic=False,
                     allows_verification=True,
                     category="BIOMEDICAL_HEALTH" if is_biomed else "PUBLIC_HEALTH",
-                    reason=f"O texto foi classificado no tema de Saúde ({laya_result.confidence * 100:.1f}% de certeza) com alegações médicas, terapêuticas ou sanitárias passíveis de validação.",
+                    reason=f"O texto foi classificado no tema de Saúde ({plumb_result.confidence * 100:.1f}% de certeza) com alegações médicas, terapêuticas ou sanitárias passíveis de validação.",
                     matched_signals=signals,
                     detected_topic="Saúde",
-                    topic_confidence=round(laya_result.confidence, 2),
+                    topic_confidence=round(plumb_result.confidence, 2),
                 )
                 self._save_cache(cache_key, decision)
                 return decision
