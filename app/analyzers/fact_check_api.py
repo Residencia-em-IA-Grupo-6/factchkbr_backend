@@ -3,6 +3,7 @@ import logging
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -16,6 +17,22 @@ from app.schemas.analysis import AnalyzerResult, Verdict
 logger = logging.getLogger("factchkbr.analyzers.fact_check_api")
 
 
+class SourceTier(str, Enum):
+    """Níveis de credibilidade e autoridade das fontes de evidência."""
+    TIER1_OFFICIAL_OR_IFCN = "tier1_official_or_ifcn"
+    TIER2_MAINSTREAM_MEDIA = "tier2_mainstream_media"
+    TIER3_GENERAL_MEDIA = "tier3_general_media"
+    UNKNOWN = "unknown"
+
+
+TIER_WEIGHTS = {
+    SourceTier.TIER1_OFFICIAL_OR_IFCN.value: 3.0,
+    SourceTier.TIER2_MAINSTREAM_MEDIA.value: 1.5,
+    SourceTier.TIER3_GENERAL_MEDIA.value: 0.8,
+    SourceTier.UNKNOWN.value: 0.0,
+}
+
+
 class EvidenceItem(BaseModel):
     """Evidência factual recuperada via Fact Check Tools ou Leitura Horizontal."""
     title: str = Field(..., description="Título da matéria, comunicado ou desmentido")
@@ -25,6 +42,10 @@ class EvidenceItem(BaseModel):
     rating: str | None = Field(default=None, description="Classificação do checador (ex: Falso, Enganoso, Verdadeiro)")
     is_fact_check: bool = Field(default=False, description="Indica se é de agência de checagem oficial")
     published_date: str | None = Field(default=None, description="Data de publicação")
+    claim_reviewed: str | None = Field(default=None, description="Alegação original revisada pelo checador")
+    source_tier: str = Field(default=SourceTier.TIER2_MAINSTREAM_MEDIA.value, description="Nível de credibilidade da fonte")
+    is_relevant: bool = Field(default=True, description="Indica se o conteúdo tem relação temática direta com a alegação")
+    stance: str = Field(default="NEUTRAL", description="Posicionamento da evidência: SUPPORTS | REFUTES | NEUTRAL")
 
 
 # Veículos de imprensa e instituições de autoridade reconhecidos para leitura horizontal
@@ -59,7 +80,37 @@ TRUSTED_MEDIA_DOMAINS = {
     "gov.br": "Portal Gov.br / Órgão Oficial",
 }
 
-# Palavras-chave indicativas de desmentido em títulos de leitura horizontal
+TIER1_IDENTIFIERS = {
+    "lupa", "aosfatos", "aos fatos", "boatos.org", "boatos", "comprova", "afp", "checamos",
+    "estadao verifica", "fato ou fake", "confere", "uol confere",
+    "gov.br", "anvisa", "fiocruz", "ibge", "ipea", "saude.gov", "tse.jus.br", "stf.jus.br",
+    "planalto.gov.br", "senado.leg.br", "camara.leg.br", "who.int", "paho.org", "cdc.gov",
+    "who", "opas", "oms", "tribunal superior eleitoral", "stf", "tse",
+}
+
+TIER2_IDENTIFIERS = {
+    "g1", "globo", "folha", "estadao", "uol", "bbc", "cnnbrasil", "cnn", "reuters",
+    "agenciabrasil", "ebc", "valor", "nexojornal", "metropoles", "elpais", "dw.com", "terra",
+}
+
+STOP_WORDS_PT = {
+    "de", "a", "o", "que", "e", "do", "da", "em", "um", "para", "é", "com", "não",
+    "uma", "os", "no", "se", "na", "por", "mais", "as", "dos", "como", "mas", "foi",
+    "ao", "ele", "das", "tem", "à", "seu", "sua", "ou", "ser", "quando", "muito",
+    "há", "nos", "já", "está", "eu", "também", "só", "pelo", "pela", "até", "isso",
+    "ela", "entre", "era", "depois", "sem", "mesmo", "aos", "ter", "seus", "quem",
+    "nas", "me", "esse", "eles", "estão", "você", "tinha", "foram", "essa", "num",
+    "nem", "suas", "meu", "às", "minha", "têm", "numa", "pelos", "elas", "havia",
+    "este", "esta", "estes", "estas", "ontem", "hoje", "amanhã", "disse", "diz",
+    "sobre", "após", "segundo", "onde", "qual", "pode", "podem", "vai", "vão",
+    "foram", "tudo", "todo", "toda", "todos", "todas", "outro", "outra", "outros",
+}
+
+NEGATION_PATTERNS = re.compile(
+    r"\b(?:não|nunca|jamais|tampouco|nenhum|nenhuma|sem|falso que|inverídico|impossível)\b",
+    re.IGNORECASE,
+)
+
 DEBUNK_TITLE_PATTERNS = re.compile(
     r"\b(?:"
     r"é falso|é mentira|é fake|é boato|não é verdade|desmente|desmentiu|nega|negou|"
@@ -70,12 +121,56 @@ DEBUNK_TITLE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Palavras-chave indicativas de confirmação factual em títulos de notícias
 CONFIRM_TITLE_PATTERNS = re.compile(
     r"\b(?:confirma|confirmou|aprova|aprovou|autoriza|autorizou|determina|proíbe|proibiu|"
-    r"suspende|suspendeu|recolhe|recolhimento|anuncia|anunciou|sanciona|sancionou)\b",
+    r"suspende|suspendeu|recolhe|recolhimento|anuncia|anunciou|sanciona|sancionou|publica|publicou)\b",
     re.IGNORECASE,
 )
+
+
+def get_source_tier(source_name: str, url: str = "", is_fact_check: bool = False) -> SourceTier:
+    """Classifica a credibilidade da fonte em tiers baseados na tipologia da fonte."""
+    s_lower = source_name.lower()
+    u_lower = url.lower()
+    if is_fact_check:
+        return SourceTier.TIER1_OFFICIAL_OR_IFCN
+    for t1 in TIER1_IDENTIFIERS:
+        if t1 in s_lower or t1 in u_lower:
+            return SourceTier.TIER1_OFFICIAL_OR_IFCN
+    for t2 in TIER2_IDENTIFIERS:
+        if t2 in s_lower or t2 in u_lower:
+            return SourceTier.TIER2_MAINSTREAM_MEDIA
+    if any(k in u_lower for k in (".com.br", ".org", ".gov", ".edu", ".net.br")):
+        return SourceTier.TIER3_GENERAL_MEDIA
+    return SourceTier.UNKNOWN
+
+
+def extract_substantive_tokens(text: str) -> list[str]:
+    """Extrai palavras substantivas (sem stop words) para verificação temática."""
+    raw_tokens = re.findall(r"\b[a-zA-ZáéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ0-9]{3,}\b", text.lower())
+    return [t for t in raw_tokens if t not in STOP_WORDS_PT]
+
+
+def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
+    """
+    Verifica se a evidência trata especificamente do mesmo assunto da alegação,
+    evitando falsos positivos gerados por notícias tangenciais ou coincidentes.
+    """
+    claim_tokens = extract_substantive_tokens(claim)
+    if not claim_tokens:
+        return True
+    ev_tokens = set(extract_substantive_tokens(evidence_text))
+
+    matches = 0
+    for ct in claim_tokens:
+        if ct in ev_tokens or any(ct[:4] == et[:4] for et in ev_tokens if len(ct) >= 4 and len(et) >= 4):
+            matches += 1
+
+    if len(claim_tokens) <= 2:
+        return matches >= len(claim_tokens)
+    if len(claim_tokens) <= 4:
+        return matches >= 2
+    return matches >= 3 or (matches / len(claim_tokens)) >= 0.40
 
 
 @register_analyzer("fact_check_api", weight=1.5)
@@ -84,7 +179,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
     Analisador 2: Evidências Externas de Fact-Checking & Leitura Horizontal.
     - Fonte Primária: Google Fact Check Tools API (checagens oficiais IFCN).
     - Leitura Horizontal: Varredura em veículos de referência (G1, Folha, Estadão, BBC)
-      e autoridades científicas e sanitárias (WHO, WebMD, Fiocruz, Anvisa).
+      e autoridades científicas e sanitárias (WHO, Fiocruz, Anvisa, IBGE).
+    - Stance Detection com sensibilidade à polaridade e credibilidade de fontes.
     """
 
     def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
@@ -101,6 +197,41 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         """Encerra conexões HTTP caso gerenciadas internamente."""
         if self._owned_client:
             await self.http_client.aclose()
+
+    async def fetch_user_urls(self, urls: list[str]) -> list[EvidenceItem]:
+        """Extrai conteúdo e metadados de URLs fornecidas diretamente pelo usuário."""
+        if not urls:
+            return []
+        evidences: list[EvidenceItem] = []
+        for url in urls[:3]:
+            try:
+                resp = await self.http_client.get(url, timeout=4.0, follow_redirects=True)
+                if resp.status_code == 200:
+                    text_html = resp.text
+                    title_m = re.search(r"<title[^>]*>(.*?)</title>", text_html, re.IGNORECASE | re.DOTALL)
+                    title = title_m.group(1).strip() if title_m else url
+                    title = re.sub(r"\s+", " ", title)
+
+                    desc_m = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']', text_html, re.IGNORECASE)
+                    desc = desc_m.group(1).strip() if desc_m else ""
+
+                    parsed_url = urllib.parse.urlparse(url)
+                    source_name = parsed_url.netloc or "Link Fornecido"
+                    tier = get_source_tier(source_name, url)
+
+                    evidences.append(
+                        EvidenceItem(
+                            title=title,
+                            source_name=f"{source_name} (URL informada)",
+                            url=url,
+                            snippet=desc or title,
+                            source_tier=tier.value,
+                            is_fact_check=tier == SourceTier.TIER1_OFFICIAL_OR_IFCN,
+                        )
+                    )
+            except Exception as e:
+                logger.debug("Não foi possível acessar a URL informada pelo usuário (%s): %s", url, e)
+        return evidences
 
     async def search_google_fact_check(self, query: str) -> list[EvidenceItem]:
         """
@@ -144,6 +275,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                                 rating=rating,
                                 is_fact_check=True,
                                 published_date=review_date,
+                                claim_reviewed=claim_text,
+                                source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
                             )
                         )
                 return evidences
@@ -165,7 +298,6 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         tasks = [self._fetch_rss(rss_url, max_items=8)]
 
-        # Se contiver termos estatísticos ou econômicos, realiza busca complementar direcionada ao IBGE e Ipea
         is_stat = bool(
             re.search(
                 r"\b(?:pib|inflação|ipca|desemprego|saúde|educação|gastos?|orçamento|taxa|censo|população|salário)\b",
@@ -187,7 +319,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         return evidences
 
     async def _fetch_rss(self, url: str, max_items: int = 8, force_official: bool = False) -> list[EvidenceItem]:
-        """Recupera e processa itens de um feed RSS de notícias."""
+        """Recupera e processa itens de um feed RSS de notícias com extração de lead/snippet."""
         evidences: list[EvidenceItem] = []
         try:
             resp = await self.http_client.get(url)
@@ -200,11 +332,17 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                     link_elem = it.find("link")
                     source_elem = it.find("source")
                     pub_elem = it.find("pubDate")
+                    desc_elem = it.find("description")
 
                     title = title_elem.text if title_elem is not None else ""
                     link = link_elem.text if link_elem is not None else ""
                     source_name = source_elem.text if source_elem is not None else "Imprensa"
                     pub_date = pub_elem.text if pub_elem is not None else None
+
+                    desc_raw = desc_elem.text if desc_elem is not None and desc_elem.text else ""
+                    desc_clean = re.sub(r"<[^>]+>", " ", desc_raw)
+                    desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
+                    snippet = desc_clean if desc_clean else title
 
                     if force_official:
                         if "ibge.gov.br" in link.lower() or "ibge" in source_name.lower():
@@ -212,21 +350,26 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                         elif "ipea.gov.br" in link.lower() or "ipea" in source_name.lower():
                             source_name = "Ipea (Dados Oficiais)"
 
-                    is_trusted = any(dom in source_name.lower() or dom in link.lower() for dom in TRUSTED_MEDIA_DOMAINS)
                     is_fact_check = (
                         any(fc in title.lower() for fc in ("fato ou fake", "verifica", "confere", "comprova", "checagem"))
                         or any(fc in source_name.lower() for fc in ("lupa", "aos fatos", "boatos"))
                     )
+                    tier = get_source_tier(source_name, link, is_fact_check)
+
+                    rating = None
+                    if is_fact_check and DEBUNK_TITLE_PATTERNS.search(title):
+                        rating = "Desmentido"
 
                     evidences.append(
                         EvidenceItem(
                             title=title,
                             source_name=source_name,
                             url=link,
-                            snippet=title,
-                            rating="Desmentido" if is_fact_check and DEBUNK_TITLE_PATTERNS.search(title) else None,
+                            snippet=snippet,
+                            rating=rating,
                             is_fact_check=is_fact_check,
                             published_date=pub_date,
+                            source_tier=tier.value,
                         )
                     )
         except Exception as e:
@@ -240,8 +383,9 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         claim: str = "",
     ) -> tuple[Verdict, float, list[str]]:
         """
-        Calcula o veredito e nível de confiança a partir das evidências consolidadas.
-        Calibrado para evitar falsos positivos de confirmação em alegações numéricas/estatísticas.
+        Calcula o veredito e nível de confiança a partir das evidências consolidadas,
+        utilizando filtro de relevância temática, alinhamento de polaridade (stance)
+        e ponderação por autoridade da fonte.
         """
         if not evidences:
             return (
@@ -253,81 +397,136 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 ],
             )
 
-        # 1. Se houver checagem direta do Google Fact Check Tools (IFCN)
-        fact_checks = [e for e in evidences if e.is_fact_check and e.rating]
-        if fact_checks:
-            ratings_text = " ".join(f.rating.lower() for f in fact_checks if f.rating)
-            if any(k in ratings_text for k in ("falso", "fake", "mentira", "adulterado", "falsa", "incorreto", "desmentido")):
-                reasons = [
-                    f"Desmentido por checador oficial ({f.source_name}): classificação '{f.rating}' para a alegação."
-                    for f in fact_checks[:2]
-                ]
-                return Verdict.FAKE, 0.95, reasons
-            elif any(k in ratings_text for k in ("verdadeiro", "fato", "verdade", "correto", "comprovado")):
-                reasons = [
-                    f"Comprovado por checador oficial ({f.source_name}): classificação '{f.rating}'."
-                    for f in fact_checks[:2]
-                ]
-                return Verdict.VERDADEIRO, 0.92, reasons
-            elif any(k in ratings_text for k in ("enganoso", "distorcido", "fora de contexto", "impreciso", "exagerado")):
-                reasons = [
-                    f"Classificado como enganoso/fora de contexto por {f.source_name}: '{f.rating}'."
-                    for f in fact_checks[:2]
-                ]
-                return Verdict.SUSPEITO, 0.85, reasons
+        claim_has_neg = bool(NEGATION_PATTERNS.search(claim))
+        supporting: list[tuple[EvidenceItem, float, str]] = []
+        refuting: list[tuple[EvidenceItem, float, str]] = []
+        suspect_evidences: list[tuple[EvidenceItem, float, str]] = []
 
-        # 2. Leitura Horizontal em Veículos de Referência e Órgãos Oficiais
-        is_quantitative = bool(
-            re.search(r"\b(?:\d+[%,\.]?\d*|por\s*cento|pib|taxa|índice|gasto)\b", claim, re.IGNORECASE)
-        )
+        for ev in evidences:
+            ev_text = f"{ev.title} {ev.snippet} {ev.claim_reviewed or ''}"
+            is_relevant = check_evidence_relevance(claim, ev_text)
+            ev.is_relevant = is_relevant
+            if not is_relevant:
+                ev.stance = "NEUTRAL"
+                continue
 
-        debunk_matching = [e for e in evidences if DEBUNK_TITLE_PATTERNS.search(e.title)]
+            tier = SourceTier(ev.source_tier) if ev.source_tier in SourceTier.__members__.values() else get_source_tier(ev.source_name, ev.url, ev.is_fact_check)
+            weight = TIER_WEIGHTS.get(tier.value, 0.0)
+            if weight <= 0.0:
+                ev.stance = "NEUTRAL"
+                continue
 
-        confirm_matching: list[EvidenceItem] = []
-        for e in evidences:
-            if CONFIRM_TITLE_PATTERNS.search(e.title):
-                if is_quantitative:
-                    # Em alegações quantitativas/numéricas, evita falsos positivos de verbos genéricos (ex.: 'aprova orçamento')
-                    # Exige que seja de checador oficial ou que haja sobreposição temática específica dos termos substantivos
-                    claim_words = [
-                        w.lower() for w in re.findall(r"\b\w{4,}\b", claim)
-                        if w.lower() not in ("aproximadamente", "brasil", "sobre", "entre", "quando", "foram", "disse")
-                    ]
-                    title_lower = e.title.lower()
-                    overlap = sum(1 for w in claim_words if w in title_lower)
-                    if e.is_fact_check or overlap >= 2:
-                        confirm_matching.append(e)
+            # 1. Se for checagem formal do Google Fact Check Tools / IFCN
+            if ev.is_fact_check and ev.rating:
+                r_lower = ev.rating.lower()
+                is_debunk = any(k in r_lower for k in ("falso", "fake", "mentira", "adulterado", "falsa", "incorreto", "desmentido"))
+                is_confirm = any(k in r_lower for k in ("verdadeiro", "fato", "verdade", "correto", "comprovado"))
+                is_misleading = any(k in r_lower for k in ("enganoso", "distorcido", "fora de contexto", "impreciso", "exagerado"))
+
+                # Remove prefixos jornalísticos de desmentido para avaliar a polaridade real da tese apurada
+                raw_rev = (ev.claim_reviewed or ev.title or "").strip()
+                clean_rev = re.sub(
+                    r"^(?:não é verdade que|é falso que|é mentira que|boato de que|falso que|desmentido:?)\s*",
+                    "",
+                    raw_rev,
+                    flags=re.IGNORECASE,
+                )
+                rev_has_neg = bool(NEGATION_PATTERNS.search(clean_rev))
+                same_polarity = (claim_has_neg == rev_has_neg)
+
+                # Se a alegação de teste não foi passada (chamada direta), assume alinhamento direto
+                if not claim:
+                    same_polarity = True
+
+                if is_misleading:
+                    ev.stance = "SUSPECT"
+                    suspect_evidences.append((ev, weight, f"Classificado como enganoso/fora de contexto por {ev.source_name}: '{ev.rating}'."))
+                elif is_debunk:
+                    if same_polarity:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Desmentido por checador oficial ({ev.source_name}): classificação '{ev.rating}' para a alegação."))
+                    else:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Desmentido da tese oposta por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
+                elif is_confirm:
+                    if same_polarity:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Comprovado por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
+                    else:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Checador oficial ({ev.source_name}) confirmou a tese oposta: '{ev.rating}'."))
+                continue
+
+            # 2. Leitura Horizontal em Mídia de Referência / Órgãos Oficiais
+            has_debunk = bool(DEBUNK_TITLE_PATTERNS.search(ev.title))
+            has_confirm = bool(CONFIRM_TITLE_PATTERNS.search(ev.title))
+
+            if has_debunk:
+                if claim_has_neg:
+                    ev.stance = "SUPPORTS"
+                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirma inexistência/desmentido em \"{ev.title}\"."))
                 else:
-                    confirm_matching.append(e)
+                    ev.stance = "REFUTES"
+                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): aponta desmentido ou contestação na matéria \"{ev.title}\"."))
+            elif has_confirm:
+                if claim_has_neg:
+                    ev.stance = "REFUTES"
+                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirma ocorrência refutando negação em \"{ev.title}\"."))
+                else:
+                    ev.stance = "SUPPORTS"
+                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação de atos ou ocorrência em \"{ev.title}\"."))
+            else:
+                ev.stance = "NEUTRAL"
 
-        if debunk_matching:
-            reasons = [
-                f"Leitura horizontal ({m.source_name}): aponta desmentido ou contestação na matéria \"{m.title}\"."
-                for m in debunk_matching[:2]
-            ]
-            confidence = 0.90 if len(debunk_matching) >= 2 else 0.80
-            return Verdict.FAKE, confidence, reasons
+        # Se houver checagem expressa classificando como enganoso/distorcido
+        if suspect_evidences and not (refuting and not supporting):
+            reasons = [r for _, _, r in suspect_evidences[:2]]
+            return Verdict.SUSPEITO, 0.85, reasons
 
-        if confirm_matching:
-            reasons = [
-                f"Leitura horizontal ({m.source_name}): confirmação de atos ou ocorrência em \"{m.title}\"."
-                for m in confirm_matching[:2]
-            ]
-            confidence = 0.88 if len(confirm_matching) >= 2 else 0.78
-            return Verdict.VERDADEIRO, confidence, reasons
+        sup_w = sum(w for _, w, _ in supporting)
+        ref_w = sum(w for _, w, _ in refuting)
+        has_ifcn = any(ev.is_fact_check for ev, _, _ in (refuting + supporting + suspect_evidences))
 
-        # 3. Caso haja matérias encontradas mas sem sinal claro de confirmação ou desmentido
-        top_titles = [f"\"{e.title}\" ({e.source_name})" for e in evidences[:2]]
+        # Decisão calibrada baseada no peso das evidências
+        if ref_w >= 1.5 and ref_w > sup_w:
+            base_conf = 0.92 if has_ifcn else 0.78
+            conf = min(0.98, max(base_conf, round(0.70 + (ref_w / (ref_w + sup_w + 1.0)) * 0.28, 2)))
+            reasons = [r for _, _, r in refuting[:2]]
+            return Verdict.FAKE, conf, reasons
+        elif sup_w >= 1.5 and sup_w > ref_w:
+            base_conf = 0.90 if has_ifcn else 0.78
+            conf = min(0.95, max(base_conf, round(0.70 + (sup_w / (sup_w + ref_w + 1.0)) * 0.25, 2)))
+            reasons = [r for _, _, r in supporting[:2]]
+            return Verdict.VERDADEIRO, conf, reasons
+        elif (ref_w >= 1.2 and sup_w >= 1.2) or suspect_evidences:
+            reasons = [r for _, _, r in suspect_evidences[:2]] if suspect_evidences else ["Fontes confiáveis apresentam dados ou posições divergentes sobre o tema."]
+            return Verdict.SUSPEITO, 0.85, reasons
+        elif ref_w >= 1.2 and sup_w >= 1.2:
+            return Verdict.SUSPEITO, 0.85, ["Fontes confiáveis apresentam dados ou posições divergentes sobre o tema."]
+
+        # 3. Caso não haja evidências com peso suficiente para confirmação ou refutação
+        relevant_evidences = [e for e in evidences if e.is_relevant]
+        if relevant_evidences:
+            top_titles = [f"\"{e.title}\" ({e.source_name})" for e in relevant_evidences[:2]]
+            return (
+                Verdict.INCONCLUSIVO,
+                0.55,
+                [
+                    f"Matérias encontradas em fontes de referência, porém sem termo explícito de desmentido ou confirmação direta: {', '.join(top_titles)}.",
+                    "Imprecisão por dados insuficientes: os registros tratam do assunto de forma genérica, sem comprovar nem desmentir categoricamente os pontos específicos da alegação.",
+                ],
+            )
+
         return (
             Verdict.INCONCLUSIVO,
-            0.55,
+            0.50,
             [
-                f"Matérias encontradas em fontes de referência, porém sem termo explícito de desmentido ou confirmação direta: {', '.join(top_titles)}.",
-                "Imprecisão por dados insuficientes: os registros tratam do assunto de forma genérica, sem comprovar nem desmentir categoricamente os pontos específicos da alegação.",
+                "Nenhuma checagem prévia ou matéria em veículos de referência foi encontrada para este fato.",
+                "Imprecisão por falta de informações: ausência de registros jornalísticos ou oficiais (pode se tratar de acontecimento muito recente ou rumor sem cobertura comprovada).",
             ],
         )
 
-    async def check_single_claim(self, claim_text: str) -> dict[str, Any]:
+    async def check_single_claim(self, claim_text: str, extra_evidences: list[EvidenceItem] | None = None) -> dict[str, Any]:
         """
         Executa a checagem isolada para uma única proposição factual:
         1. Consulta Google Fact Check Tools API
@@ -341,7 +540,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         results = await asyncio.gather(fc_task, lat_task, return_exceptions=True)
         google_evidences = results[0] if isinstance(results[0], list) else []
         lateral_evidences = results[1] if isinstance(results[1], list) else []
-        all_evidences = google_evidences + lateral_evidences
+        all_evidences = (extra_evidences or []) + google_evidences + lateral_evidences
 
         verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text)
 
@@ -366,6 +565,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             "reasons": reasons,
             "sources": sources,
             "evidences": [e.model_dump() for e in all_evidences[:4]],
+            "google_fact_check_count": len(google_evidences),
+            "lateral_reading_count": len(lateral_evidences),
         }
 
     def aggregate_sub_verdicts(self, sub_results: list[dict[str, Any]]) -> tuple[Verdict, float, list[str]]:
@@ -375,7 +576,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         - Todas FAKE: FAKE
         - Todas VERDADEIRO: VERDADEIRO
         - FAKE + INCONCLUSIVO: FAKE
-        - VERDADEIRO + INCONCLUSIVO: VERDADEIRO (ou SUSPEITO se houver distorção)
+        - VERDADEIRO + INCONCLUSIVO: VERDADEIRO
         - Todas INCONCLUSIVO: INCONCLUSIVO
         """
         if not sub_results:
@@ -445,23 +646,29 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         """
         Executa a checagem das alegações isoladamente.
         Se 'assertions' for fornecido com múltiplas alegações, checa cada uma em paralelo.
-        Caso contrário, checa a alegação contida em 'text'.
+        Lê e incorpora metadados de 'urls' enviadas pelo usuário.
         """
         targets = [a.strip() for a in assertions if a and a.strip()] if assertions else []
         if not targets:
             targets = [text.strip()] if text.strip() else []
 
-        # Limita a no máximo 4 alegações para evitar sobrecarga de rede
         targets = targets[:4]
 
+        # Extrai conteúdo de URLs informadas pelo usuário
+        user_evidences = await self.fetch_user_urls(urls) if urls else []
+
         # Executa a checagem de cada alegação em paralelo
-        sub_results = await asyncio.gather(*[self.check_single_claim(t) for t in targets])
+        sub_results = await asyncio.gather(*[self.check_single_claim(t, extra_evidences=user_evidences) for t in targets])
 
         all_evidences = []
         all_sources = []
+        total_fc_count = 0
+        total_lat_count = 0
         for sr in sub_results:
             all_evidences.extend(sr.get("evidences", []))
             all_sources.extend(sr.get("sources", []))
+            total_fc_count += sr.get("google_fact_check_count", 0)
+            total_lat_count += sr.get("lateral_reading_count", 0)
 
         verdict, confidence, reasons = self.aggregate_sub_verdicts(sub_results)
 
@@ -487,6 +694,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             sources=list(dict.fromkeys(all_sources))[:6] or ["Mídia de Referência e Órgãos Oficiais"],
             raw_details={
                 "total_evidences": len(all_evidences),
+                "google_fact_check_count": total_fc_count,
+                "lateral_reading_count": total_lat_count,
                 "claims_checked": len(sub_results),
                 "sub_claims": sub_results,
                 "evidences": all_evidences,

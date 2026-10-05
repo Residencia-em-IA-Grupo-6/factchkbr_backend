@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -34,20 +35,46 @@ class FactCheckOrchestrator:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._cached_analyzers: dict[str, BaseAnalyzer] = {}
 
     def get_active_analyzers(self) -> list[BaseAnalyzer]:
         """
-        Instancia e retorna os analisadores ativos configurados no ACTIVE_ANALYZERS.
+        Instancia e retorna os analisadores ativos configurados no ACTIVE_ANALYZERS,
+        mantendo instâncias em cache para evitar reinicializações e vazamento de conexões.
         """
         registry.auto_discover("app.analyzers")
         active_names = self.settings.get_active_analyzers_list()
 
         analyzers: list[BaseAnalyzer] = []
         for name in active_names:
-            analyzer_cls = registry.get(name)
-            if analyzer_cls:
-                analyzers.append(analyzer_cls())
+            if name not in self._cached_analyzers:
+                analyzer_cls = registry.get(name)
+                if analyzer_cls:
+                    self._cached_analyzers[name] = analyzer_cls()
+            if name in self._cached_analyzers:
+                analyzers.append(self._cached_analyzers[name])
         return analyzers
+
+    async def aclose(self) -> None:
+        """Encerra conexões HTTP e recursos assíncronos dos analisadores em cache."""
+        for name, analyzer in list(self._cached_analyzers.items()):
+            if hasattr(analyzer, "aclose") and callable(analyzer.aclose):
+                try:
+                    await analyzer.aclose()
+                except Exception as e:
+                    logger.warning("Erro ao fechar analisador %s: %s", name, e)
+            elif hasattr(analyzer, "http_client") and hasattr(analyzer.http_client, "aclose"):
+                try:
+                    await analyzer.http_client.aclose()
+                except Exception as e:
+                    logger.warning("Erro ao fechar cliente HTTP de %s: %s", name, e)
+        self._cached_analyzers.clear()
+
+    async def __aenter__(self) -> "FactCheckOrchestrator":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.aclose()
 
     async def analyze(
         self,
@@ -57,8 +84,8 @@ class FactCheckOrchestrator:
     ) -> AnalyzeResponse:
         """
         Executa o pipeline linear contextual com rastreabilidade de etapas:
-        1. Heurística (texto bruto, captura estilo e sensacionalismo)
-        2. Extrator de Alegações (spaCy + LLM, isola fatos atômicos e faz gatekeeping)
+        1. Heurística (texto bruto, captura estilo e sensacionalismo) [Paralelo]
+        2. Extrator de Alegações (spaCy + LLM, isola fatos atômicos e faz gatekeeping) [Paralelo]
         3. Fact-Check API & Leitura Horizontal (pesquisa evidências com a claim limpa)
         4. LLM Judge (julga o fato embasado nas evidências e nas métricas)
         """
@@ -76,12 +103,24 @@ class FactCheckOrchestrator:
 
         results: list[AnalyzerResult] = []
 
+        async def _run_stage(name: str, coro: Any) -> tuple[str, AnalyzerResult, float]:
+            t0 = time.perf_counter()
+            res = await coro
+            dur = time.perf_counter() - t0
+            return name, res, dur
+
+        # Dispara heurística e extrator em paralelo (ambos processam o texto original)
+        h_task = None
+        c_task = None
+        if "heuristic" in active_map:
+            h_task = asyncio.create_task(_run_stage("heuristic", active_map["heuristic"].analyze(text, urls)))
+        if "claim_extractor" in active_map:
+            c_task = asyncio.create_task(_run_stage("claim_extractor", active_map["claim_extractor"].analyze(text, urls)))
+
         # 1. Heuristic Analyzer (Texto Bruto)
         heuristic_features: dict[str, Any] = {}
-        if "heuristic" in active_map:
-            t0 = time.perf_counter()
-            h_res = await active_map["heuristic"].analyze(text, urls)
-            dur = time.perf_counter() - t0
+        if h_task:
+            _, h_res, dur = await h_task
             results.append(h_res)
             heuristic_features = h_res.raw_details or {}
             logger.info("Etapa 'heuristic' concluída em %.3fs", dur)
@@ -93,10 +132,8 @@ class FactCheckOrchestrator:
         # 2. Claim Extractor (spaCy Gatekeeper + LLM Decomposer)
         target_claim = text
         check_worthy_stmts: list[str] = []
-        if "claim_extractor" in active_map:
-            t0 = time.perf_counter()
-            c_res = await active_map["claim_extractor"].analyze(text, urls)
-            dur = time.perf_counter() - t0
+        if c_task:
+            _, c_res, dur = await c_task
             results.append(c_res)
             logger.info("Etapa 'claim_extractor' concluída em %.3fs. Claim: '%s'", dur, c_res.claim)
             if on_step:
@@ -187,6 +224,12 @@ class FactCheckOrchestrator:
             if not primary_claim and r.claim:
                 primary_claim = r.claim
 
+        # Filtra previamente itens repetidos de sub-alegações para reconstrução limpa e consolidada
+        filtered_reasons = [
+            r for r in all_reasons
+            if not re.match(r"^\[Alegação \d+ - [^\]]+\]", r, re.IGNORECASE)
+        ]
+
         # Filtra apenas os analisadores que emitem veredito
         verdict_bearing_results = [r for r in results if r.verdict is not None]
 
@@ -196,6 +239,24 @@ class FactCheckOrchestrator:
 
         fc_sub_claims = (fc_res.raw_details or {}).get("sub_claims", []) if fc_res else []
         judge_sub_claims = (judge_res.raw_details or {}).get("sub_claims", []) if judge_res else []
+
+        # Salvaguarda epistemológica: Ausência de evidência não é evidência de falsidade.
+        # Verifica se há desmentido factual comprovado nas evidências globais ou sub-alegações
+        has_debunk = False
+        if fc_res:
+            evidences = (fc_res.raw_details or {}).get("evidences", [])
+            has_debunk = (
+                fc_res.verdict == Verdict.FAKE
+                or any(
+                    e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
+                    or e.get("stance") == "REFUTES"
+                    for e in evidences
+                )
+                or any(
+                    sc.get("verdict") in (Verdict.FAKE, "FAKE")
+                    for sc in fc_sub_claims
+                )
+            )
 
         consolidated_sub_claims: list[SubClaimAnalysis] = []
         base_sub_claims = judge_sub_claims if len(judge_sub_claims) >= len(fc_sub_claims) and judge_sub_claims else fc_sub_claims
@@ -222,6 +283,23 @@ class FactCheckOrchestrator:
                 if isinstance(sub_v, str):
                     sub_v = Verdict[sub_v.upper()] if sub_v.upper() in Verdict.__members__ else Verdict.INCONCLUSIVO
 
+                # Verifica se a sub-alegação tem comprovação de desmentido em fontes factuais
+                f_debunk = False
+                if f_match:
+                    f_v = f_match.get("verdict")
+                    if isinstance(f_v, str):
+                        f_v = Verdict[f_v.upper()] if f_v.upper() in Verdict.__members__ else Verdict.INCONCLUSIVO
+                    f_debunk = (f_v == Verdict.FAKE)
+                    if not f_debunk and f_match.get("evidences"):
+                        f_debunk = any(
+                            e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
+                            or e.get("stance") == "REFUTES"
+                            for e in f_match.get("evidences", [])
+                        )
+
+                if len(base_sub_claims) == 1:
+                    f_debunk = f_debunk or has_debunk
+
                 # Determina confiança
                 sub_c = 0.80
                 if j_match and "confidence" in j_match:
@@ -239,6 +317,16 @@ class FactCheckOrchestrator:
                     sub_just = f_match["justification"]
                 else:
                     sub_just = item.get("justification", "Avaliação individual.")
+
+                # Salvaguarda epistemológica no nível de cada proposição:
+                # Se o avaliador apontou FAKE mas não há evidência/desmentido factual, reverte para INCONCLUSIVO
+                if sub_v == Verdict.FAKE and not f_debunk:
+                    sub_v = Verdict.INCONCLUSIVO
+                    sub_c = 0.55
+                    sub_just = (
+                        f"{sub_just.rstrip('.')} — Ausência de referências comprobatórias de falsidade; "
+                        f"classificado como inconclusivo por carência de dados ou fato recente."
+                    )
 
                 # Determina fontes
                 sub_sources = []
@@ -258,28 +346,16 @@ class FactCheckOrchestrator:
                 )
 
                 sub_v_name = sub_v.value if hasattr(sub_v, "value") else str(sub_v)
-                all_reasons.append(f"[Alegação {idx+1} - {sub_v_name}]: \"{stmt}\" ➔ {sub_just}")
+                filtered_reasons.append(f"[Alegação {idx+1} - {sub_v_name}]: \"{stmt}\" ➔ {sub_just}")
 
         if verdict_bearing_results:
-            # Salvaguarda epistemológica: Ausência de evidência não é evidência de falsidade.
-            # Se não houver referências que comprovem que a alegação é falsa (desmentido de checador ou mídia),
-            # previne classificação precipitada como FAKE decorrente de factóide recente ou rumor sem cobertura.
-            has_debunk = False
-            if fc_res:
-                evidences = (fc_res.raw_details or {}).get("evidences", [])
-                has_debunk = any(
-                    e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
-                    or fc_res.verdict == Verdict.FAKE
-                    for e in evidences
-                ) or fc_res.verdict == Verdict.FAKE
-
             conclusive = [r for r in verdict_bearing_results if r.verdict != Verdict.INCONCLUSIVO]
             if conclusive:
                 best_result = max(conclusive, key=lambda r: r.confidence)
                 if best_result.verdict == Verdict.FAKE and not has_debunk:
                     dominant_verdict = Verdict.INCONCLUSIVO
                     final_confidence = 0.60
-                    all_reasons.append(
+                    filtered_reasons.append(
                         "Ausência de referências comprobatórias de falsidade: a carência de dados ou matérias recentes impede a classificação como fake."
                     )
                 else:
@@ -291,7 +367,7 @@ class FactCheckOrchestrator:
                     logger.warning("Conflito detectado: fact_check_api possui desmentido comprovado mas decisor apontou VERDADEIRO. Prevalecendo FAKE.")
                     dominant_verdict = Verdict.FAKE
                     final_confidence = max(fc_res.confidence, 0.85)
-                    all_reasons.append(
+                    filtered_reasons.append(
                         "Prevalência de checagem oficial: fontes jornalísticas/IFCN de desmentido têm precedência probatória sobre confirmação divergente."
                     )
             else:
@@ -303,6 +379,7 @@ class FactCheckOrchestrator:
                 has_fake = any(sc.verdict == Verdict.FAKE for sc in consolidated_sub_claims)
                 has_true = any(sc.verdict == Verdict.VERDADEIRO for sc in consolidated_sub_claims)
                 has_suspect = any(sc.verdict == Verdict.SUSPEITO for sc in consolidated_sub_claims)
+                has_inconclusive = any(sc.verdict == Verdict.INCONCLUSIVO for sc in consolidated_sub_claims)
 
                 if has_fake and has_true:
                     dominant_verdict = Verdict.SUSPEITO
@@ -311,10 +388,26 @@ class FactCheckOrchestrator:
                     dominant_verdict = Verdict.SUSPEITO
                     final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
                 elif has_fake and not has_true:
-                    dominant_verdict = Verdict.FAKE
-                    final_confidence = max(sc.confidence for sc in consolidated_sub_claims)
-                elif has_true and not has_fake:
+                    if has_debunk:
+                        dominant_verdict = Verdict.FAKE
+                        final_confidence = max(sc.confidence for sc in consolidated_sub_claims if sc.verdict == Verdict.FAKE)
+                    else:
+                        dominant_verdict = Verdict.INCONCLUSIVO
+                        final_confidence = 0.55
+                        filtered_reasons.append(
+                            "Ausência de referências comprobatórias de falsidade: a carência de dados ou matérias recentes impede a classificação como fake."
+                        )
+                elif has_true and not has_fake and not has_inconclusive:
                     dominant_verdict = Verdict.VERDADEIRO
+                    final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
+                elif has_true and has_inconclusive and not has_fake:
+                    dominant_verdict = Verdict.SUSPEITO
+                    final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
+                    filtered_reasons.append(
+                        "Texto misto: contém alegações confirmadas associadas a alegações sem confirmação factual disponível."
+                    )
+                else:
+                    dominant_verdict = Verdict.INCONCLUSIVO
                     final_confidence = sum(sc.confidence for sc in consolidated_sub_claims) / len(consolidated_sub_claims)
 
             # Prioriza o resumo explicativo do LLM Judge se coerente com o veredito dominante, senão do fact_check_api
@@ -331,7 +424,7 @@ class FactCheckOrchestrator:
             else:
                 summary = f"Análise consolidada por {len(verdict_bearing_results)} modelo(s) decisor(es) com apoio de {len(results) - len(verdict_bearing_results)} módulo(s) de features."
 
-            if dominant_verdict == Verdict.INCONCLUSIVO and not any(k in summary.lower() for k in ("recente", "insuficiente", "ausência", "falta de", "imprecis")):
+            if dominant_verdict == Verdict.INCONCLUSIVO and not any(k in summary.lower() for k in ("recente", "insuficiente", "ausência", "falta de", "imprecis", "escassez")):
                 summary += " Não há referências suficientes para confirmar nem refutar a afirmação (imprecisão por escassez de dados ou acontecimento recente)."
         else:
             dominant_verdict = Verdict.INCONCLUSIVO
@@ -343,7 +436,7 @@ class FactCheckOrchestrator:
             verdict=dominant_verdict,
             confidence=round(final_confidence, 2),
             summary=summary,
-            reasons=list(dict.fromkeys(all_reasons)),
+            reasons=list(dict.fromkeys(filtered_reasons)),
             sources=list(dict.fromkeys(all_sources)),
             sub_claims=consolidated_sub_claims,
         )

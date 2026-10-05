@@ -91,20 +91,43 @@ def infer_source_types(text: str = "", entities: dict[str, list[str]] | None = N
 
 class SpacyPreprocessor:
     """Higienização de ruídos estruturais, extração de entidades e gatekeeping sintático."""
+    _nlp: Any = None
 
     def __init__(self) -> None:
-        for model in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
-            try:
-                self.nlp = spacy.load(model, exclude=["lemmatizer"])
-                logger.info("spaCy carregado com sucesso: %s", model)
-                break
-            except Exception:
-                continue
-        else:
-            raise RuntimeError(
-                "Nenhum modelo do spaCy foi encontrado. "
-                "Execute: python -m spacy download pt_core_news_sm"
-            )
+        if SpacyPreprocessor._nlp is None:
+            for model in ("pt_core_news_sm", "pt_core_news_md", "pt_core_news_lg"):
+                try:
+                    SpacyPreprocessor._nlp = spacy.load(model, exclude=["lemmatizer"])
+                    logger.info("spaCy carregado com sucesso (singleton): %s", model)
+                    break
+                except Exception:
+                    continue
+            else:
+                raise RuntimeError(
+                    "Nenhum modelo do spaCy foi encontrado. "
+                    "Execute: python -m spacy download pt_core_news_sm"
+                )
+        self.nlp = SpacyPreprocessor._nlp
+
+    def extract_syntactic_triple(self, text: str) -> dict[str, str]:
+        """Extrai aproximação sintática (sujeito, predicado, objeto) via spaCy para fallback estruturado."""
+        doc = self.nlp(text)
+        subj = ""
+        pred = ""
+        obj = ""
+        for t in doc:
+            if "subj" in t.dep_ and not subj:
+                subj = " ".join(w.text for w in t.subtree).strip()
+            elif t.pos_ in ("VERB", "AUX") and not pred:
+                pred = t.text
+            elif ("obj" in t.dep_ or "obl" in t.dep_) and not obj:
+                obj = " ".join(w.text for w in t.subtree).strip()
+
+        return {
+            "subject": subj or "Sujeito",
+            "predicate": pred or "declara",
+            "object": obj or text[:80],
+        }
 
     def clean_text(self, text: str) -> str:
         """Remove emojis de alarme, normaliza pontuações repetidas e limpa alertas de manchete."""
@@ -155,6 +178,14 @@ class SpacyPreprocessor:
         """
         entities = self.extract_entities(text)
         if not text or len(text.strip()) < 6:
+            return entities, False
+
+        # Descarta saudações, bênçãos ou opiniões puras sem dados empíricos
+        opinion_patterns = re.compile(
+            r"^(?:bom dia|boa tarde|boa noite|olá|ola|que deus|deus te|deus abençoe|eu acho|na minha opinião|eu acredito|penso que|me parece|que absurdo|que vergonha)\b",
+            re.IGNORECASE,
+        )
+        if opinion_patterns.search(text.strip()):
             return entities, False
 
         doc = self.nlp(text)
@@ -258,7 +289,8 @@ DECOMPOSITION_JSON_SCHEMA = {
 
 
 class LLMClaimDecomposer:
-    """Decomposição semântica e estruturação exclusivamente via LLM com cache LRU em memória."""
+    """Decomposição semântica e estruturação via LLM com cache LRU em memória compartilhada."""
+    _shared_cache: OrderedDict[str, tuple[str | None, list[AtomicAssertion]]] = OrderedDict()
 
     def __init__(self, http_client: httpx.AsyncClient | None = None, cache_maxsize: int = 1024) -> None:
         self.settings = get_settings()
@@ -268,18 +300,17 @@ class LLMClaimDecomposer:
             limits=httpx.Limits(max_keepalive_connections=25, max_connections=50),
         )
         self._cache_maxsize = cache_maxsize
-        self._cache: OrderedDict[str, tuple[str | None, list[AtomicAssertion]]] = OrderedDict()
 
     def _get_from_cache(self, key: str) -> tuple[str | None, list[AtomicAssertion]] | None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
+        if key in self._shared_cache:
+            self._shared_cache.move_to_end(key)
+            return self._shared_cache[key]
         return None
 
     def _save_to_cache(self, key: str, value: tuple[str | None, list[AtomicAssertion]]) -> None:
-        self._cache[key] = value
-        if len(self._cache) > self._cache_maxsize:
-            self._cache.popitem(last=False)
+        self._shared_cache[key] = value
+        if len(self._shared_cache) > self._cache_maxsize:
+            self._shared_cache.popitem(last=False)
 
     async def aclose(self) -> None:
         """Encerra cliente HTTP se instanciado internamente."""
@@ -458,8 +489,32 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
                 engine_used="spacy_gatekeeper_short_circuit",
             )
 
-        # Camada 2: Decomposição Semântica e Atômica exclusivamente via LLM
+        # Camada 2: Decomposição Semântica e Atômica via LLM
         primary_claim, assertions = await self.decomposer.decompose(cleaned, entities)
+        engine_used = f"llm:{self.settings.get_llm_model()}"
+
+        # Fallback de resiliência: se o LLM falhou/está indisponível mas a oração é viável pelo spaCy
+        if not assertions and is_viable:
+            logger.info("LLM indisponível para decomposição. Ativando fallback sintático estruturado do spaCy.")
+            triple_dict = self.preprocessor.extract_syntactic_triple(cleaned)
+            fallback_assertion = AtomicAssertion(
+                id=1,
+                statement=cleaned,
+                category=ClaimCategory.FACTUAL_CLAIM,
+                triple=KnowledgeTriple(
+                    subject=triple_dict.get("subject", "Sujeito"),
+                    predicate=triple_dict.get("predicate", "declara"),
+                    object=triple_dict.get("object", "objeto"),
+                ),
+                suggested_source_types=[
+                    VerificationSourceType.DADOS_PUBLICOS.value,
+                    VerificationSourceType.AGENCIA_CHECAGEM.value,
+                ],
+                is_check_worthy=True,
+            )
+            assertions = [fallback_assertion]
+            primary_claim = cleaned
+            engine_used = "spacy_syntactic_fallback"
 
         # Seleciona asserção principal usando a taxonomia semântica (sem hardcoded)
         primary_assertion = select_primary_assertion(assertions, primary_claim)
@@ -478,7 +533,7 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
             entities=entities,
             assertions=assertions,
             discarded_fragments=discarded,
-            engine_used=f"llm:{self.settings.get_llm_model()}",
+            engine_used=engine_used,
         )
 
     async def analyze(self, text: str, urls: list[str]) -> AnalyzerResult:

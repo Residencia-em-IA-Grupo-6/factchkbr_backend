@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from app.config import Settings, get_settings
 from app.core.orchestrator import FactCheckOrchestrator
 from app.core.registry import registry
@@ -11,7 +11,12 @@ from app.schemas.analysis import (
 router = APIRouter()
 
 
-def get_orchestrator(settings: Settings = Depends(get_settings)) -> FactCheckOrchestrator:
+def get_orchestrator(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> FactCheckOrchestrator:
+    if hasattr(request.app.state, "orchestrator") and request.app.state.orchestrator is not None:
+        return request.app.state.orchestrator
     return FactCheckOrchestrator(settings=settings)
 
 

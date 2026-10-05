@@ -3,14 +3,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import router as api_router
 from app.config import get_settings
+from app.core.orchestrator import FactCheckOrchestrator
 from app.core.registry import registry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ciclo de vida: inicializa a descoberta de analisadores no Registry."""
+    """Ciclo de vida: inicializa descoberta de analisadores e gerencia o ciclo do orquestrador."""
     registry.auto_discover("app.analyzers")
-    yield
+    orchestrator = FactCheckOrchestrator(settings=get_settings())
+    # Pré-carrega analisadores ativos
+    orchestrator.get_active_analyzers()
+    app.state.orchestrator = orchestrator
+    try:
+        yield
+    finally:
+        await orchestrator.aclose()
 
 
 def create_app() -> FastAPI:
