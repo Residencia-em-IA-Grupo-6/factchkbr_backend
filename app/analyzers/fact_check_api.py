@@ -86,6 +86,7 @@ TIER1_HOST_SUFFIXES = (
     "anvisa.gov.br", "fiocruz.br", "ibge.gov.br", "ipea.gov.br", "saude.gov.br",
     "aosfatos.org", "lupa.news", "boatos.org", "projetocomprova.com.br",
     "who.int", "paho.org", "cdc.gov",
+    "clinicaltrials.gov", "europepmc.org", "ncbi.nlm.nih.gov",
 )
 
 TIER2_HOST_SUFFIXES = (
@@ -109,6 +110,8 @@ TIER1_SOURCE_NAMES = {
     "ministério da saúde", "anvisa", "fiocruz", "ibge", "ipea",
     "tribunal superior eleitoral", "tse", "supremo tribunal federal", "stf",
     "organização mundial da saúde", "oms", "who", "opas",
+    "clinicaltrials.gov", "clinicaltrials", "europe pmc", "pubmed",
+    "anvisa medicamentos", "base local anvisa", "anvisa (dados abertos oficiais)",
 }
 
 TIER2_SOURCE_NAMES = {
@@ -495,6 +498,170 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         return evidences
 
+    def inspect_local_health_kb(self, query: str) -> list[EvidenceItem]:
+        """
+        Camada 1: Consulta a Base Local de Saúde (Anvisa) em SQLite.
+        Retorna evidências regulatórias instantâneas sobre fármacos, vacinas, produtos cancelados ou ativos.
+        Se a base local não estiver disponível, retorna lista vazia para operação exclusiva via Camada 2.
+        """
+        evidences: list[EvidenceItem] = []
+        try:
+            from app.services.health_kb import get_health_kb
+            kb = get_health_kb()
+            if not kb.is_available():
+                return []
+
+            inspection = kb.inspect_health_claim(query)
+            for m in inspection.get("medications_found", []):
+                trade_name = m.get("trade_name", "")
+                active_principle = m.get("active_principle", "")
+                status = m.get("registration_status", "")
+                category = m.get("regulatory_category", "")
+                therap_class = m.get("therapeutic_class", "")
+                company = m.get("company", "")
+                reg_num = m.get("registration_number", "")
+
+                status_lower = status.lower()
+                is_active = status_lower in ("ativo", "válido", "valido")
+
+                if not is_active:
+                    rating = f"Registro {status} na Anvisa"
+                    stance = "REFUTES"
+                    title = f"Registro Oficial Anvisa: {trade_name} ({active_principle}) com status '{status}'"
+                    snippet = (
+                        f"O medicamento '{trade_name}' (Princípio ativo: {active_principle}, Categoria: {category}, "
+                        f"Classe: {therap_class}, Empresa: {company}) consta na base oficial da Anvisa como '{status}', "
+                        f"não possuindo registro ativo para comercialização regular."
+                    )
+                    is_fact_check = True
+                else:
+                    rating = "Registro Ativo na Anvisa"
+                    stance = "NEUTRAL"
+                    title = f"Registro Oficial Anvisa ({trade_name}): {active_principle}"
+                    snippet = (
+                        f"Medicamento '{trade_name}' (Princípio ativo: {active_principle}) registrado sob nº {reg_num} "
+                        f"na Anvisa. Categoria: {category}. Classe terapêutica: {therap_class}. "
+                        f"Empresa detentora: {company}. Status regulatório: {status}."
+                    )
+                    is_fact_check = False
+
+                evidences.append(
+                    EvidenceItem(
+                        title=title,
+                        source_name="Anvisa (Dados Abertos Oficiais)",
+                        url=f"https://consultas.anvisa.gov.br/#/medicamentos/q/?nomeProduto={urllib.parse.quote(trade_name)}",
+                        snippet=snippet[:320],
+                        rating=rating,
+                        is_fact_check=is_fact_check,
+                        source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+                        stance=stance,
+                        is_relevant=True,
+                    )
+                )
+        except Exception as e:
+            logger.debug("Falha na consulta à base local da Anvisa: %s", e)
+
+        return evidences
+
+    async def search_clinical_trials(self, query: str) -> list[EvidenceItem]:
+        """
+        Camada 2: Consulta o registro global ClinicalTrials.gov REST API v2 para verificar
+        ensaios clínicos, estudos científicos, eficácia e status de aprovação.
+        """
+        clean_q = re.sub(r"[\"']", "", query)
+        encoded_query = urllib.parse.quote(clean_q[:120])
+        url = f"https://clinicaltrials.gov/api/v2/studies?query.term={encoded_query}&pageSize=3"
+
+        evidences: list[EvidenceItem] = []
+        try:
+            resp = await self.http_client.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                studies = data.get("studies", [])
+                for s in studies:
+                    proto = s.get("protocolSection", {})
+                    id_mod = proto.get("identificationModule", {})
+                    status_mod = proto.get("statusModule", {})
+                    desc_mod = proto.get("descriptionModule", {})
+
+                    nct_id = id_mod.get("nctId", "")
+                    brief_title = id_mod.get("briefTitle", "")
+                    overall_status = status_mod.get("overallStatus", "DESCONHECIDO")
+                    brief_summary = desc_mod.get("briefSummary", "")
+
+                    if not brief_title:
+                        continue
+
+                    rating = None
+                    stance = "NEUTRAL"
+                    if overall_status in ("TERMINATED", "WITHDRAWN", "SUSPENDED"):
+                        rating = "Ensaio Interrompido/Suspenso"
+                        stance = "REFUTES"
+
+                    evidences.append(
+                        EvidenceItem(
+                            title=f"Ensaio Clínico [{overall_status}]: {brief_title}",
+                            source_name="ClinicalTrials.gov (NIH/Registro Oficial)",
+                            url=f"https://clinicaltrials.gov/study/{nct_id}" if nct_id else "https://clinicaltrials.gov",
+                            snippet=f"Status: {overall_status}. {brief_summary[:280]}",
+                            rating=rating,
+                            is_fact_check=False,
+                            source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+                            stance=stance,
+                            is_relevant=True,
+                        )
+                    )
+        except Exception as e:
+            logger.debug("Falha na consulta ao ClinicalTrials.gov (%s): %s", query[:60], e)
+
+        return evidences
+
+    async def search_biomedical_literature(self, query: str) -> list[EvidenceItem]:
+        """
+        Camada 2: Consulta a base biomédica Europe PMC / PubMed para identificar
+        estudos científicos, ensaios clínicos e revisões sistemáticas revisadas por pares.
+        """
+        clean_q = re.sub(r"[\"']", "", query)
+        encoded_query = urllib.parse.quote(clean_q[:120])
+        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={encoded_query}&format=json&pageSize=3"
+
+        evidences: list[EvidenceItem] = []
+        try:
+            resp = await self.http_client.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("resultList", {}).get("result", [])
+                for r in results:
+                    title = r.get("title", "").rstrip(".")
+                    journal = r.get("journalTitle") or "Literatura Biomédica (PubMed/PMC)"
+                    author = r.get("authorString", "")
+                    year = r.get("pubYear", "")
+                    ext_id = r.get("id", "")
+                    source = r.get("source", "MED")
+                    snippet = r.get("abstractText", "") or f"Artigo publicado em {journal} ({year}) por {author}."
+
+                    if not title:
+                        continue
+
+                    article_url = f"https://europepmc.org/article/{source}/{ext_id}" if ext_id else "https://europepmc.org"
+
+                    evidences.append(
+                        EvidenceItem(
+                            title=f"Estudo Científico ({journal}): {title}",
+                            source_name=f"{journal} (PubMed/PMC)",
+                            url=article_url,
+                            snippet=re.sub(r"<[^>]+>", "", snippet)[:300],
+                            rating=None,
+                            is_fact_check=False,
+                            source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+                            is_relevant=True,
+                        )
+                    )
+        except Exception as e:
+            logger.debug("Falha na consulta à base biomédica Europe PMC (%s): %s", query[:60], e)
+
+        return evidences
+
     def evaluate_verdict(
         self,
         evidences: list[EvidenceItem],
@@ -524,7 +691,10 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         for ev in evidences:
             ev_text = f"{ev.title} {ev.snippet} {ev.claim_reviewed or ''}"
-            is_relevant = check_evidence_relevance(claim, ev_text)
+            if ev.source_name.startswith("Anvisa") or ev.source_name.startswith("ClinicalTrials") or "PubMed" in ev.source_name or "Europe PMC" in ev.source_name:
+                is_relevant = True
+            else:
+                is_relevant = check_evidence_relevance(claim, ev_text)
             ev.is_relevant = is_relevant
             if not is_relevant:
                 ev.stance = "NEUTRAL"
@@ -536,11 +706,24 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 ev.stance = "NEUTRAL"
                 continue
 
-            # 1. Se for checagem formal do Google Fact Check Tools / IFCN
+            # 1. Se for checagem formal do Google Fact Check Tools / IFCN ou Registro Sanitário Oficial
             if ev.is_fact_check and ev.rating:
                 r_lower = ev.rating.lower()
-                is_debunk = any(k in r_lower for k in ("falso", "fake", "mentira", "adulterado", "falsa", "incorreto", "desmentido"))
-                is_confirm = any(k in r_lower for k in ("verdadeiro", "fato", "verdade", "correto", "comprovado"))
+                is_debunk = any(
+                    k in r_lower
+                    for k in (
+                        "falso", "fake", "mentira", "adulterado", "falsa", "incorreto",
+                        "desmentido", "inativo", "cancelado", "proibido", "irregular",
+                        "suspenso", "interrompido",
+                    )
+                )
+                is_confirm = any(
+                    k in r_lower
+                    for k in (
+                        "verdadeiro", "fato", "verdade", "correto", "comprovado",
+                        "ativo", "aprovado", "válido", "valido",
+                    )
+                )
                 is_misleading = any(k in r_lower for k in ("enganoso", "distorcido", "fora de contexto", "impreciso", "exagerado"))
 
                 # Remove prefixos jornalísticos de desmentido para avaliar a polaridade real da tese apurada
@@ -681,23 +864,40 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
     async def check_single_claim(self, claim_text: str, extra_evidences: list[EvidenceItem] | None = None) -> dict[str, Any]:
         """
         Executa a checagem isolada para uma única proposição factual:
-        1. Consulta Google Fact Check Tools API
-        2. Executa Leitura Horizontal
+        - Camada 1: Base Local da ANVISA (SQLite) para validação regulatória instantânea
+        - Camada 2: Google Fact Check Tools + Leitura Horizontal + ClinicalTrials.gov + Europe PMC
         3. Avalia veredito, confiança e fundamentação específica
         """
         clean_text = claim_text.strip()
+
+        # Camada 1: Consulta local e instantânea à base oficial ANVISA (se disponível)
+        local_evidences = self.inspect_local_health_kb(clean_text)
+
+        # Camada 2: Varredura concorrente em fontes externas (checagens, imprensa de referência e repositórios biomédicos)
         fc_task = self.search_google_fact_check(clean_text)
         lat_task = self.search_lateral_reading(clean_text)
+        ct_task = self.search_clinical_trials(clean_text)
+        bio_task = self.search_biomedical_literature(clean_text)
 
-        results = await asyncio.gather(fc_task, lat_task, return_exceptions=True)
+        results = await asyncio.gather(fc_task, lat_task, ct_task, bio_task, return_exceptions=True)
         google_evidences = results[0] if isinstance(results[0], list) else []
         lateral_evidences = results[1] if isinstance(results[1], list) else []
-        all_evidences = (extra_evidences or []) + google_evidences + lateral_evidences
+        ct_evidences = results[2] if isinstance(results[2], list) else []
+        bio_evidences = results[3] if isinstance(results[3], list) else []
+
+        all_evidences = (
+            (extra_evidences or [])
+            + local_evidences
+            + google_evidences
+            + lateral_evidences
+            + ct_evidences
+            + bio_evidences
+        )
 
         verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text)
 
         sources = []
-        for e in all_evidences[:3]:
+        for e in all_evidences[:4]:
             sources.append(f"{e.source_name}: {e.title}")
 
         if verdict == Verdict.FAKE:
@@ -719,9 +919,12 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             "justification": justification,
             "reasons": reasons,
             "sources": sources,
-            "evidences": [e.model_dump() for e in all_evidences[:4]],
+            "evidences": [e.model_dump() for e in all_evidences[:6]],
+            "anvisa_local_count": len(local_evidences),
             "google_fact_check_count": len(google_evidences),
             "lateral_reading_count": len(lateral_evidences),
+            "clinical_trials_count": len(ct_evidences),
+            "biomedical_count": len(bio_evidences),
         }
 
     def aggregate_sub_verdicts(self, sub_results: list[dict[str, Any]]) -> tuple[Verdict, float, list[str]]:
@@ -819,11 +1022,17 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         all_sources = []
         total_fc_count = 0
         total_lat_count = 0
+        total_anvisa_count = 0
+        total_ct_count = 0
+        total_bio_count = 0
         for sr in sub_results:
             all_evidences.extend(sr.get("evidences", []))
             all_sources.extend(sr.get("sources", []))
             total_fc_count += sr.get("google_fact_check_count", 0)
             total_lat_count += sr.get("lateral_reading_count", 0)
+            total_anvisa_count += sr.get("anvisa_local_count", 0)
+            total_ct_count += sr.get("clinical_trials_count", 0)
+            total_bio_count += sr.get("biomedical_count", 0)
 
         verdict, confidence, reasons = self.aggregate_sub_verdicts(sub_results)
 
@@ -849,8 +1058,11 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             sources=list(dict.fromkeys(all_sources))[:6] or ["Mídia de Referência e Órgãos Oficiais"],
             raw_details={
                 "total_evidences": len(all_evidences),
+                "anvisa_local_count": total_anvisa_count,
                 "google_fact_check_count": total_fc_count,
                 "lateral_reading_count": total_lat_count,
+                "clinical_trials_count": total_ct_count,
+                "biomedical_count": total_bio_count,
                 "claims_checked": len(sub_results),
                 "sub_claims": sub_results,
                 "evidences": all_evidences,
