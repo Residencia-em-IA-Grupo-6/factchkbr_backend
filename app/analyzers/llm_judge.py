@@ -58,11 +58,13 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             "   - Se a alegação for comprovada como verdadeira pelas fontes, o veredito é 'VERDADEIRO'.\n"
             "   - Se a alegação trouxer exagero, distorção ou meia-verdade, o veredito é 'SUSPEITO'.\n"
             "   - Se NÃO houver referências suficientes para confirmar nem para refutar a afirmação (ex: fatos muito recentes em andamento, escassez de fontes ou matérias genéricas sem os dados específicos), o veredito DEVE ser 'INCONCLUSIVO'. Aponte explicitamente no resumo a imprecisão por falta de dados ou por se tratar de fato recente.\n\n"
-            "3. CUIDADO CRÍTICO COM ALEGAÇÕES NEGATIVAS E DUPLA NEGAÇÃO (INVERSÃO DE POLARIDADE):\n"
-            "   - Preste atenção extrema quando a alegação contiver negação (ex: 'não', 'nunca', 'jamais', 'não pode', 'não é').\n"
-            "   - Se a alegação afirma que algo 'NÃO PODE SER FEITO' ou 'NÃO OCORRE', e as fontes/desmentidos mostram que PODE SER FEITO ou dizem 'É falso que não pode', a alegação recebida é FALSA (verdict: 'FAKE').\n"
-            "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Se o fato alegado é inverídico, o veredito é 'FAKE'.\n"
-            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a alegação 'foi desmentida', 'foi refutada', 'é falsa' ou 'incorreta', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
+            "3. CUIDADO CRÍTICO COM ALEGAÇÕES NEGATIVAS, DUPLA NEGAÇÃO E META-ASSERÇÕES DE DESMENTIDO:\n"
+            "   - Preste atenção extrema quando a alegação contiver negação ou desmentido em si (ex: 'não', 'não pode', 'é falso que...', 'não é verdade que...').\n"
+            "   - META-ASSERÇÕES DE DESMENTIDO: Se o texto recebido já afirma que um boato é falso (ex: 'É falso que o voto não vale no INSS', 'É mentira que vacinas causam autismo'), e as checagens/fontes confirmam que o boato é realmente falso, o veredito para a alegação recebida é VERDADEIRO (pois o autor está correto ao afirmar que o boato é falso).\n"
+            "   - Se a alegação recebida propaga o boato como se fosse verdade (ex: 'Voto não pode ser usado no INSS', 'Vacinas causam autismo'), e as fontes desmentem o boato, aí sim o veredito da alegação é FAKE.\n"
+            "   - Se as fontes confirmam o fato que o autor disse ser falso (ex: autor diz 'É falso que o Brasil ganhou a Copa de 2002', mas o Brasil de fato ganhou), o veredito é FAKE.\n"
+            "   - Nunca confunda 'a notícia de checagem é verdadeira' com 'a alegação recebida é verdadeira'. Certifique-se de julgar se o que o autor AFIRMOU no texto corresponde aos fatos.\n"
+            "   - COERÊNCIA OBRIGATÓRIA: Se no seu próprio resumo ou razões você afirmar que a tese do autor 'foi desmentida', 'foi refutada', 'é falsa' ou 'incorreta', o veredito OBRIGATORIAMENTE deve ser 'FAKE', NUNCA 'VERDADEIRO'.\n\n"
             "4. AVALIAÇÃO DISCRIMINADA DE SUB-ALEGAÇÕES (claims_evaluation):\n"
             "   - Se forem fornecidas múltiplas alegações atômicas, avalie CADA UMA isoladamente no campo 'claims_evaluation'.\n"
             "   - Justifique pontualmente por que cada alegação é verdadeira ou falsa com base nas evidências.\n"
@@ -118,10 +120,30 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             user_content += f"Nota de alerta: O texto original possui sinais expressivos de sensacionalismo/apelo (índice: {score:.2f}).\n\n"
 
         has_negation = bool(re.search(r"\b(?:não|nunca|jamais|tampouco|nenhum|nenhuma)\b", text, re.IGNORECASE))
-        if has_debunk:
-            user_content += "Atenção de verificação: As evidências acima contêm desmentido explícito. Se as fontes desmentem a alegação, o veredito DEVE ser FAKE.\n\n"
-        if has_negation:
-            user_content += "Atenção à polaridade: A alegação recebida é uma afirmação negativa. Se as fontes mostram que a afirmação negativa é inverídica (ou seja, a ação é permitida/ocorre), o veredito deve ser FAKE.\n\n"
+        has_meta_debunk = bool(
+            re.match(
+                r"^(?:(?:fato ou fake|uol confere|comprova|estadao verifica|estadão verifica|aos fatos|lupa|afp checamos|afp|boatos\.org)\s*[:\-]\s*)?"
+                r"(?:não é verdade que|não procede que|é falso que|é mentira que|é fake que|é boato que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
+                text.strip(),
+                re.IGNORECASE,
+            )
+        )
+
+        if has_meta_debunk:
+            user_content += (
+                "Atenção à meta-asserção: O texto recebido já é uma declaração de que determinada afirmação é falsa ou boato. "
+                "Se as evidências e checagens mostram que se trata de boato/falsidade, a afirmação do usuário está correta e o veredito deve ser VERDADEIRO.\n\n"
+            )
+        elif has_debunk:
+            user_content += (
+                "Atenção de verificação: As fontes contêm desmentido explícito. "
+                "Se as evidências refutam diretamente a afirmação feita pelo usuário, o veredito deve ser FAKE.\n\n"
+            )
+        if has_negation and not has_meta_debunk:
+            user_content += (
+                "Atenção à polaridade: A alegação recebida é uma afirmação negativa. "
+                "Se as fontes mostram que a afirmação negativa é inverídica (ou seja, a ação é permitida/ocorre), o veredito deve ser FAKE.\n\n"
+            )
 
         user_content += (
             "Avalie as evidências e emita o veredito final com justificativa fundamentada. "
@@ -166,9 +188,9 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                         "foi desmentid", "foi refutad", "desmentiu a afirmação",
                         "desmentiu a alegação", "desmentida por", "desmentido por",
                         "afirmação é falsa", "alegação é falsa", "afirmação falsa",
-                        "alegação falsa", "declaração é falsa", "é falso que",
+                        "alegação falsa", "declaração é falsa",
                         "desmentido oficial", "trata-se de desinformação",
-                        "trata-se de boato", "não procede", "afirmação incorreta"
+                        "não procede", "afirmação incorreta"
                     )
                     confirm_cues = (
                         "comprovadamente verdadeiro", "fato comprovado",
@@ -178,12 +200,25 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                     )
 
                     polarity_corrected = False
-                    if verdict == Verdict.VERDADEIRO and any(cue in explanation_corpus for cue in debunk_cues):
+                    if not has_meta_debunk and verdict == Verdict.VERDADEIRO and any(cue in explanation_corpus for cue in debunk_cues):
                         logger.warning(
                             "Inversão de polaridade detectada no LLM Judge: explicação indica desmentido, "
                             "mas veredito emitido foi VERDADEIRO. Corrigindo veredito para FAKE."
                         )
                         verdict = Verdict.FAKE
+                        polarity_corrected = True
+
+                    elif (
+                        has_meta_debunk
+                        and verdict == Verdict.FAKE
+                        and any(cue in explanation_corpus for cue in ("foi desmentid", "desmentiu", "desmentido", "trata-se de boato", "é boato", "é falso que"))
+                        and not any(cue in explanation_corpus for cue in ("afirmação do usuário é falsa", "declaração do autor é falsa", "alegação do usuário é falsa"))
+                    ):
+                        logger.warning(
+                            "Inversão de polaridade em meta-asserção detectada no LLM Judge: explicação indica desmentido do boato, "
+                            "mas veredito emitido foi FAKE. Corrigindo veredito para VERDADEIRO."
+                        )
+                        verdict = Verdict.VERDADEIRO
                         polarity_corrected = True
 
                     elif (
@@ -206,12 +241,33 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                             if isinstance(item, dict):
                                 sub_v_raw = str(item.get("verdict", "INCONCLUSIVO")).upper()
                                 sub_v = Verdict[sub_v_raw] if sub_v_raw in Verdict.__members__ else Verdict.INCONCLUSIVO
+                                sub_stmt = item.get("statement", "")
+                                sub_just = item.get("justification", "")
+
+                                # Salvaguarda de polaridade em meta-asserções na avaliação da sub-alegação
+                                sub_is_meta = bool(
+                                    re.match(
+                                        r"^(?:(?:fato ou fake|uol confere|comprova|estadao verifica|estadão verifica|aos fatos|lupa|afp checamos|afp|boatos\.org)\s*[:\-]\s*)?"
+                                        r"(?:não é verdade que|não procede que|é falso que|é mentira que|é fake que|é boato que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
+                                        sub_stmt.strip(),
+                                        re.IGNORECASE,
+                                    )
+                                )
+                                if sub_is_meta and sub_v == Verdict.FAKE and any(
+                                    cue in sub_just.lower()
+                                    for cue in ("desmentid", "desmentiu", "classificaram a afirmação como falso", "classificou a afirmação como falso", "é falso", "boato")
+                                ):
+                                    sub_v = Verdict.VERDADEIRO
+
                                 parsed_sub_claims.append({
-                                    "statement": item.get("statement", ""),
+                                    "statement": sub_stmt,
                                     "verdict": sub_v,
                                     "confidence": float(item.get("confidence", confidence)),
-                                    "justification": item.get("justification", ""),
+                                    "justification": sub_just,
                                 })
+
+                        if polarity_corrected and len(parsed_sub_claims) == 1:
+                            parsed_sub_claims[0]["verdict"] = verdict
                     elif sub_claims:
                         # Fallback se o modelo não gerou o array claims_evaluation
                         for sc in sub_claims:

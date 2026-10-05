@@ -42,6 +42,13 @@ RE_ALARM_HEADERS = re.compile(
     re.IGNORECASE,
 )
 
+# Padrão para detecção de vazamento de tradução para inglês por LLMs menores
+ENGLISH_WORDS_PATTERN = re.compile(
+    r"\b(?:the|is|are|was|were|can|cannot|could|should|would|will|and|or|of|in|on|at|by|with|from|to|be|been|being|voting|used|claim)\b",
+    re.IGNORECASE,
+)
+
+
 # Siglas de órgãos e entidades institucionais para enriquecer reconhecimento de entidades
 KNOWN_ORGS = {
     "STF", "TSE", "STJ", "TCU", "ANVISA", "PF", "PRF", "IBGE", "MEC", "SUS",
@@ -208,6 +215,11 @@ SpacyNERCleaner = SpacyPreprocessor
 SYSTEM_PROMPT = """Você é um especialista em Fact-Checking e Extração Semântica de Alegações (Claim Extraction & Check-Worthiness).
 Sua responsabilidade é analisar o texto recebido de redes sociais ou fontes públicas e estruturar suas proposições atômicas, identificando com precisão a alegação central a ser checada.
 
+### REQUISITOS FUNDAMENTAIS:
+- IDIOMA ESTRITAMENTE EM PORTUGUÊS (pt-BR): Todos os campos ('primary_claim', 'statement', 'triple.subject', 'triple.predicate', 'triple.object') DEVEM ser mantidos rigorosamente em PORTUGUÊS (pt-BR). É expressamente PROIBIDO traduzir termos para o inglês ou qualquer outro idioma.
+- PRESERVAÇÃO DENOTATIVA: Mantenha a alegação central expressa em português de forma clara, denotativa e fiel ao sentido pretendido. Se o texto for "É falso que voto não pode ser usado no INSS", a primary_claim deve ser em português (ex: "É falso que voto não pode ser usado no INSS" ou "O voto não pode ser utilizado como prova de vida do INSS"), NUNCA gere frases em inglês como "voting can be used in INSS".
+- COMPLETUDE DAS ASSERÇÕES: Cada asserção ('statement') DEVE ser uma oração completa e inteligível (ex: 'É falso que o voto não pode ser usado no INSS'). NUNCA retorne fragmentos incompletos como apenas 'É falso' ou 'Não procede'.
+
 ### DIRETRIZES SEMÂNTICAS:
 1. IDENTIFICAÇÃO DA ALEGAÇÃO CENTRAL (primary_claim):
    - Textos frequentemente combinam desabafos, retórica interpessoal, saudações, menções a suporte ("tá na bula", "ouvi no rádio") e proposições empíricas sobre o mundo real.
@@ -227,7 +239,7 @@ Sua responsabilidade é analisar o texto recebido de redes sociais ou fontes pú
 4. NORMALIZAÇÃO DENOTATIVA:
    - Elimine sensacionalismo, pontuações de pânico e pronomes de desabafo pessoal.
    - Preserve rigorosamente entidades, datas, locais e dados quantitativos expressos no texto original.
-   - Responda estritamente no schema JSON fornecido."""
+   - Responda estritamente no schema JSON fornecido e OBRIGATORIAMENTE em português (pt-BR)."""
 
 DECOMPOSITION_JSON_SCHEMA = {
     "type": "object",
@@ -333,7 +345,8 @@ class LLMClaimDecomposer:
         user_prompt = (
             f"Texto: \"{cleaned_text}\"\n"
             f"Entidades pré-detectadas: {json.dumps(entities, ensure_ascii=False)}\n\n"
-            "Analise o texto acima, classifique as proposições atômicas e identifique a alegação central substantiva a ser checada."
+            "Analise o texto acima, classifique as proposições atômicas e identifique a alegação central substantiva a ser checada. "
+            "Responda OBRIGATORIAMENTE em português (pt-BR)."
         )
 
         payload = {
@@ -377,10 +390,29 @@ class LLMClaimDecomposer:
             primary_claim = parsed.get("primary_claim")
             raw_assertions = parsed.get("assertions", [])
 
+            # Salvaguarda contra contaminação linguística (ex: modelo menor traduzindo para inglês)
+            cleaned_has_en = bool(ENGLISH_WORDS_PATTERN.search(cleaned_text))
+            if primary_claim and isinstance(primary_claim, str) and not cleaned_has_en:
+                if bool(ENGLISH_WORDS_PATTERN.search(primary_claim)):
+                    logger.warning(
+                        "Tradução indevida para inglês detectada no primary_claim ('%s'). Restaurando texto original em português.",
+                        primary_claim,
+                    )
+                    primary_claim = cleaned_text
+
             assertions: list[AtomicAssertion] = []
             for item in raw_assertions:
                 # Normaliza categoria taxonômica
                 item["category"] = map_claim_category(item.get("category"))
+
+                # Salvaguarda linguística e de completude em statement
+                stmt = item.get("statement", "")
+                if stmt and isinstance(stmt, str):
+                    if not cleaned_has_en and bool(ENGLISH_WORDS_PATTERN.search(stmt)):
+                        stmt = cleaned_text
+                    if len(stmt.split()) < 3 and (primary_claim or cleaned_text):
+                        stmt = primary_claim or cleaned_text
+                    item["statement"] = stmt
 
                 # Normaliza fontes
                 cleaned_sources: list[str] = []

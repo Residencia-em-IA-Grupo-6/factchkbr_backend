@@ -156,12 +156,14 @@ class FactCheckOrchestrator:
                         sources=c_res.sources
                     )
 
-            # Extrai proposições checáveis para checagem isolada
             raw_assertions = (c_res.raw_details or {}).get("assertions", [])
             for a in raw_assertions:
                 if isinstance(a, dict):
                     if a.get("is_check_worthy", True) and a.get("statement"):
-                        check_worthy_stmts.append(a["statement"])
+                        stmt = a["statement"].strip()
+                        if len(stmt.split()) < 3 and target_claim:
+                            stmt = target_claim
+                        check_worthy_stmts.append(stmt)
 
         # 3. Fact-Check API & Leitura Horizontal (com a claim isolada e proposições atômicas)
         evidences: list[dict[str, Any]] = []
@@ -249,7 +251,7 @@ class FactCheckOrchestrator:
             has_debunk = (
                 fc_res.verdict == Verdict.FAKE
                 or any(
-                    e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
+                    (e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido") and e.get("stance") != "SUPPORTS")
                     or e.get("stance") == "REFUTES"
                     for e in evidences
                 )
@@ -261,7 +263,7 @@ class FactCheckOrchestrator:
             has_confirm = (
                 fc_res.verdict == Verdict.VERDADEIRO
                 or any(
-                    (e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado")
+                    ((e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado") and e.get("stance") != "REFUTES")
                      or e.get("stance") == "SUPPORTS")
                     and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
                     for e in evidences
@@ -310,13 +312,13 @@ class FactCheckOrchestrator:
                     f_evs = f_match.get("evidences", [])
                     if not f_debunk and f_evs:
                         f_debunk = any(
-                            e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido")
+                            (e.get("rating") in ("Falso", "Fake", "Mentira", "Desmentido") and e.get("stance") != "SUPPORTS")
                             or e.get("stance") == "REFUTES"
                             for e in f_evs
                         )
                     if not f_confirm and f_evs:
                         f_confirm = any(
-                            (e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado")
+                            ((e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado") and e.get("stance") != "REFUTES")
                              or e.get("stance") == "SUPPORTS")
                             and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
                             for e in f_evs

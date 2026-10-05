@@ -152,6 +152,18 @@ CONFIRM_TITLE_PATTERNS = re.compile(
 )
 
 
+META_DEBUNK_PREFIX = re.compile(
+    r"^(?:(?:fato ou fake|uol confere|comprova|estadao verifica|estadão verifica|aos fatos|lupa|afp checamos|afp|boatos\.org)\s*[:\-]\s*)?"
+    r"(?:não é verdade que|não procede que|é falso que|é mentira que|é fake que|é boato que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
+    re.IGNORECASE,
+)
+
+
+def is_meta_debunk_claim(text: str) -> bool:
+    """Verifica se a alegação é uma meta-asserção de desmentido (ex: 'É falso que...', 'Não é verdade que...')."""
+    return bool(META_DEBUNK_PREFIX.match(text.strip()))
+
+
 def clean_reviewed_claim(text: str) -> str:
     """Remove prefixos jornalísticos comuns de checagem para isolar o núcleo da alegação."""
     cleaned = re.sub(
@@ -161,12 +173,13 @@ def clean_reviewed_claim(text: str) -> str:
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(
-        r"^(?:não é verdade que|é falso que|é mentira que|é fake que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
+        r"^(?:não é verdade que|não procede que|é falso que|é mentira que|é fake que|é boato que|boato de que|falso que|falsa que|desmentido:?|alerta:?)\s*",
         "",
         cleaned.strip(),
         flags=re.IGNORECASE,
     )
     return cleaned.strip()
+
 
 
 TIER1_FACT_CHECK_NAMES = {
@@ -232,7 +245,8 @@ def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
     Verifica se a evidência trata especificamente do mesmo assunto da alegação,
     evitando falsos positivos gerados por notícias tangenciais ou coincidentes.
     """
-    claim_tokens = extract_substantive_tokens(claim)
+    clean_c = clean_reviewed_claim(claim)
+    claim_tokens = extract_substantive_tokens(clean_c if clean_c else claim)
     if not claim_tokens:
         return True
     ev_tokens = set(extract_substantive_tokens(evidence_text))
@@ -256,10 +270,6 @@ def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
     n_tokens = len(claim_tokens)
     if n_tokens <= 2:
         return matches >= n_tokens
-    if n_tokens == 3:
-        return matches >= 3
-    if n_tokens == 4:
-        return matches >= 3
     return (matches / n_tokens) >= 0.50
 
 
@@ -487,7 +497,9 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 ],
             )
 
-        claim_has_neg = bool(NEGATION_PATTERNS.search(claim))
+        user_has_meta = is_meta_debunk_claim(claim)
+        core_claim = clean_reviewed_claim(claim) if user_has_meta else claim.strip()
+        core_claim_has_neg = bool(NEGATION_PATTERNS.search(core_claim))
         supporting: list[tuple[EvidenceItem, float, str]] = []
         refuting: list[tuple[EvidenceItem, float, str]] = []
         suspect_evidences: list[tuple[EvidenceItem, float, str]] = []
@@ -516,7 +528,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 # Remove prefixos jornalísticos de desmentido para avaliar a polaridade real da tese apurada
                 clean_rev = clean_reviewed_claim(ev.claim_reviewed or ev.title or "")
                 rev_has_neg = bool(NEGATION_PATTERNS.search(clean_rev))
-                same_polarity = (claim_has_neg == rev_has_neg)
+                same_polarity = (core_claim_has_neg == rev_has_neg)
 
                 # Se a alegação de teste não foi passada (chamada direta), assume alinhamento direto
                 if not claim:
@@ -526,19 +538,35 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                     ev.stance = "SUSPECT"
                     suspect_evidences.append((ev, weight, f"Classificado como enganoso/fora de contexto por {ev.source_name}: '{ev.rating}'."))
                 elif is_debunk:
-                    if same_polarity:
-                        ev.stance = "REFUTES"
-                        refuting.append((ev, weight, f"Desmentido por checador oficial ({ev.source_name}): classificação '{ev.rating}' para a alegação."))
+                    if user_has_meta:
+                        if same_polarity:
+                            ev.stance = "SUPPORTS"
+                            supporting.append((ev, weight, f"Checador oficial ({ev.source_name}) confirma desmentido do boato apontado: '{ev.rating}'."))
+                        else:
+                            ev.stance = "REFUTES"
+                            refuting.append((ev, weight, f"Checador oficial ({ev.source_name}) desmentiu a tese contrária: '{ev.rating}'."))
                     else:
-                        ev.stance = "SUPPORTS"
-                        supporting.append((ev, weight, f"Desmentido da tese oposta por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
+                        if same_polarity:
+                            ev.stance = "REFUTES"
+                            refuting.append((ev, weight, f"Desmentido por checador oficial ({ev.source_name}): classificação '{ev.rating}' para a alegação."))
+                        else:
+                            ev.stance = "SUPPORTS"
+                            supporting.append((ev, weight, f"Desmentido da tese oposta por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
                 elif is_confirm:
-                    if same_polarity:
-                        ev.stance = "SUPPORTS"
-                        supporting.append((ev, weight, f"Comprovado por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
+                    if user_has_meta:
+                        if same_polarity:
+                            ev.stance = "REFUTES"
+                            refuting.append((ev, weight, f"Checador oficial ({ev.source_name}) confirmou a tese, contrapondo a alegação de boato: '{ev.rating}'."))
+                        else:
+                            ev.stance = "SUPPORTS"
+                            supporting.append((ev, weight, f"Checador oficial ({ev.source_name}) comprovou tese oposta: '{ev.rating}'."))
                     else:
-                        ev.stance = "REFUTES"
-                        refuting.append((ev, weight, f"Checador oficial ({ev.source_name}) confirmou a tese oposta: '{ev.rating}'."))
+                        if same_polarity:
+                            ev.stance = "SUPPORTS"
+                            supporting.append((ev, weight, f"Comprovado por checador oficial ({ev.source_name}): classificação '{ev.rating}'."))
+                        else:
+                            ev.stance = "REFUTES"
+                            refuting.append((ev, weight, f"Checador oficial ({ev.source_name}) confirmou a tese oposta: '{ev.rating}'."))
                 continue
 
             # 2. Leitura Horizontal em Mídia de Referência / Órgãos Oficiais
@@ -547,24 +575,40 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
             clean_title = clean_reviewed_claim(ev.title)
             title_has_neg = bool(NEGATION_PATTERNS.search(clean_title))
-            same_polarity = (claim_has_neg == title_has_neg)
+            same_polarity = (core_claim_has_neg == title_has_neg)
             if not claim:
                 same_polarity = True
 
             if has_debunk:
-                if same_polarity:
-                    ev.stance = "REFUTES"
-                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): aponta desmentido ou contestação na matéria \"{ev.title}\"."))
+                if user_has_meta:
+                    if same_polarity:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação de desmentido do boato em \"{ev.title}\"."))
+                    else:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): desmente tese contrária em \"{ev.title}\"."))
                 else:
-                    ev.stance = "SUPPORTS"
-                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): desmente a tese contrária em \"{ev.title}\"."))
+                    if same_polarity:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): aponta desmentido ou contestação na matéria \"{ev.title}\"."))
+                    else:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): desmente a tese contrária em \"{ev.title}\"."))
             elif has_confirm:
-                if same_polarity:
-                    ev.stance = "SUPPORTS"
-                    supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação de atos ou ocorrência em \"{ev.title}\"."))
+                if user_has_meta:
+                    if same_polarity:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): comprovação do fato contrapõe a alegação de boato em \"{ev.title}\"."))
+                    else:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação em \"{ev.title}\"."))
                 else:
-                    ev.stance = "REFUTES"
-                    refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação da tese oposta em \"{ev.title}\"."))
+                    if same_polarity:
+                        ev.stance = "SUPPORTS"
+                        supporting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação de atos ou ocorrência em \"{ev.title}\"."))
+                    else:
+                        ev.stance = "REFUTES"
+                        refuting.append((ev, weight, f"Leitura horizontal ({ev.source_name}): confirmação da tese oposta em \"{ev.title}\"."))
             else:
                 ev.stance = "NEUTRAL"
 

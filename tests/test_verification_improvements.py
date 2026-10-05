@@ -5,6 +5,7 @@ from app.analyzers.fact_check_api import (
     check_evidence_relevance,
     EvidenceItem,
     FactCheckApiAnalyzer,
+    is_meta_debunk_claim,
 )
 from app.core.orchestrator import FactCheckOrchestrator
 from app.schemas.analysis import AnalyzerResult, Verdict, SubClaimAnalysis
@@ -279,3 +280,162 @@ def test_adversarial_orchestrator_symmetrical_epistemology():
     r2 = orchestrator._consolidate("Fato comprovado", [fc_proven, judge_fake_hallucination])
     assert r2.verdict == Verdict.VERDADEIRO
     assert r2.confidence == 0.90
+
+
+def test_is_meta_debunk_claim():
+    """Valida a detecção de meta-asserções de desmentido."""
+    assert is_meta_debunk_claim("É falso que voto não pode ser usado no INSS") is True
+    assert is_meta_debunk_claim("É mentira que vacina causa infarto") is True
+    assert is_meta_debunk_claim("Não é verdade que o governo vai confiscar a poupança") is True
+    assert is_meta_debunk_claim("Aos Fatos: É falso que Lula assinou decreto...") is True
+    assert is_meta_debunk_claim("Não procede que haverá aumento de impostos") is True
+    assert is_meta_debunk_claim("Voto nas eleições não pode ser utilizado como prova de vida") is False
+    assert is_meta_debunk_claim("Governo anuncia novo programa social") is False
+
+
+def test_meta_debunk_stance_and_verdict():
+    """
+    Valida que quando o usuário afirma que um boato é falso (ex: 'É falso que voto não pode ser usado no INSS'),
+    e as evidências checam e desmentem o boato, a evidência dá suporte (SUPPORTS) e o veredito é VERDADEIRO.
+    """
+    analyzer = FactCheckApiAnalyzer()
+
+    ev_aos_fatos = EvidenceItem(
+        title="É falso que voto nas eleições não pode ser utilizado como prova de vida do INSS",
+        source_name="Aos Fatos (Fact-Check)",
+        url="https://aosfatos.org/noticias/voto-inss",
+        snippet="Alegação revisada: Voto nas eleições não pode ser utilizado como prova de vida do INSS | Classificação: Falso",
+        rating="Falso",
+        is_fact_check=True,
+        claim_reviewed="Voto nas eleições não pode ser utilizado como prova de vida do INSS",
+        source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+    )
+
+    ev_uol = EvidenceItem(
+        title="Voto nas eleições de 2026 valerá como prova de vida do INSS",
+        source_name="UOL Notícias (Fact-Check)",
+        url="https://noticias.uol.com.br/confere/voto-inss",
+        snippet="TSE e INSS confirmaram a integração",
+        rating="Verdadeiro",
+        is_fact_check=True,
+        claim_reviewed="Voto nas eleições de 2026 valerá como prova de vida do INSS",
+        source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+    )
+
+    evidences = [ev_aos_fatos, ev_uol]
+    claim = "É falso que voto não pode ser usado no INSS"
+
+    verdict, confidence, reasons = analyzer.evaluate_verdict(evidences, claim=claim)
+
+    assert ev_aos_fatos.stance == "SUPPORTS"
+    assert ev_uol.stance == "SUPPORTS"
+    assert verdict == Verdict.VERDADEIRO
+    assert confidence >= 0.90
+    assert any("confirma desmentido do boato apontado" in r or "comprovado por checador oficial" in r.lower() for r in reasons)
+
+
+def test_meta_debunk_false_assertion():
+    """
+    Valida que se o usuário diz que um fato real é falso (ex: 'É falso que o Brasil foi pentacampeão'),
+    e as evidências comprovam o fato, o veredito para o usuário é FAKE.
+    """
+    analyzer = FactCheckApiAnalyzer()
+
+    ev_penta = EvidenceItem(
+        title="Brasil conquista o pentacampeonato mundial de futebol",
+        source_name="G1 Notícias",
+        url="https://g1.globo.com/esporte/copa",
+        snippet="Seleção brasileira vence a Alemanha e se consagra pentacampeã",
+        rating="Verdadeiro",
+        is_fact_check=True,
+        claim_reviewed="Brasil conquista o pentacampeonato mundial",
+        source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+    )
+
+    claim = "É falso que o Brasil conquistou o pentacampeonato"
+    verdict, confidence, reasons = analyzer.evaluate_verdict([ev_penta], claim=claim)
+
+    assert ev_penta.stance == "REFUTES"
+    assert verdict == Verdict.FAKE
+
+
+def test_orchestrator_consolidation_meta_debunk():
+    """Valida a consolidação final para uma meta-asserção verdadeira sem bloqueio por falso positivo de debunk."""
+    orchestrator = FactCheckOrchestrator()
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.VERDADEIRO,
+        confidence=0.95,
+        claim="É falso que voto não pode ser usado no INSS",
+        summary="Fontes de checagem confirmam que a tese de impedimento é um boato.",
+        reasons=["Aos Fatos desmentiu o boato."],
+        sources=["Aos Fatos", "UOL Confere"],
+        raw_details={
+            "evidences": [
+                {
+                    "title": "É falso que voto não pode ser utilizado como prova de vida",
+                    "source_name": "Aos Fatos",
+                    "rating": "Falso",
+                    "stance": "SUPPORTS",
+                    "source_tier": "tier1_official_or_ifcn",
+                }
+            ],
+            "sub_claims": [
+                {
+                    "statement": "É falso que voto não pode ser usado no INSS",
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.95,
+                    "justification": "Desmentido do boato confirmado.",
+                    "sources": ["Aos Fatos"],
+                    "evidences": [
+                        {
+                            "title": "É falso que voto não pode ser utilizado",
+                            "source_name": "Aos Fatos",
+                            "rating": "Falso",
+                            "stance": "SUPPORTS",
+                            "source_tier": "tier1_official_or_ifcn",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.VERDADEIRO,
+        confidence=0.95,
+        claim="É falso que voto não pode ser usado no INSS",
+        summary="A afirmação do usuário está correta: as fontes comprovam que o voto pode sim ser utilizado.",
+        reasons=["Aos Fatos desmentiu a tese contrária."],
+        sources=["Aos Fatos"],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": "É falso que voto não pode ser usado no INSS",
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.95,
+                    "justification": "Afirmação verdadeira, boato desmentido.",
+                }
+            ]
+        },
+    )
+
+    resp = orchestrator._consolidate("É falso que voto não pode ser usado no INSS", [fc_result, judge_result])
+    assert resp.verdict == Verdict.VERDADEIRO
+    assert resp.confidence >= 0.90
+    assert len(resp.sub_claims) == 1
+    assert resp.sub_claims[0].verdict == Verdict.VERDADEIRO
+
+
+def test_claim_extractor_language_safeguard():
+    """Valida o regex de detecção de contaminação linguística do claim extractor."""
+    from app.analyzers.claim_extractor import ENGLISH_WORDS_PATTERN
+
+    english_text = "voting can be used in INSS"
+    portuguese_text = "É falso que voto não pode ser usado no INSS"
+
+    assert bool(ENGLISH_WORDS_PATTERN.search(english_text)) is True
+    assert bool(ENGLISH_WORDS_PATTERN.search(portuguese_text)) is False
+
