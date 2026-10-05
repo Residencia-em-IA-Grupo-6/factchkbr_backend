@@ -96,6 +96,43 @@ def infer_source_types(text: str = "", entities: dict[str, list[str]] | None = N
 # 1. PRÉ-PROCESSAMENTO & GATEKEEPER VIA SPACY (CPU)
 # ==============================================================================
 
+HEALTH_FACTUAL_VERBS = {
+    "emagrece", "emagrecem", "emagreça", "emagrecer",
+    "engorda", "engordam", "engordar",
+    "cura", "curam", "curar", "cure",
+    "mata", "matam", "matar",
+    "salva", "salvam", "salvar",
+    "alivia", "aliviam", "aliviar",
+    "previne", "previnem", "prevenir",
+    "protege", "protegem", "proteger",
+    "causa", "causam", "causar",
+    "provoca", "provocam", "provocar",
+    "combate", "combatem", "combater",
+    "funciona", "funcionam", "funcionar",
+    "melhora", "melhoram", "melhorar",
+    "piora", "pioram", "piorar",
+    "aumenta", "aumentam", "aumentar",
+    "diminui", "diminuem", "diminuir",
+    "reduz", "reduzem", "reduzir",
+    "trata", "tratam", "tratar",
+    "limpa", "limpam", "limpar",
+    "desintoxica", "desintoxicam", "desintoxicar",
+    "seca", "secam", "secar",
+}
+
+
+def is_verb_like_token(token: Any) -> bool:
+    """Detecta predicados verbais mesmo quando o spaCy pt_core_news_sm comete erros de etiquetagem (ex: 'emagrece' como ADJ)."""
+    if token.pos_ in ("VERB", "AUX"):
+        return True
+    lower = token.text.lower()
+    if lower in HEALTH_FACTUAL_VERBS:
+        return True
+    if lower.endswith(("ecer", "ece", "ecem", "eceu", "ecerá", "ecendo")):
+        return True
+    return False
+
+
 class SpacyPreprocessor:
     """Higienização de ruídos estruturais, extração de entidades e gatekeeping sintático."""
     _nlp: Any = None
@@ -122,13 +159,29 @@ class SpacyPreprocessor:
         subj = ""
         pred = ""
         obj = ""
-        for t in doc:
-            if "subj" in t.dep_ and not subj:
-                subj = " ".join(w.text for w in t.subtree).strip()
-            elif t.pos_ in ("VERB", "AUX") and not pred:
+
+        # Tenta localizar verbo principal (inclusive com detecção robusta de verbos biológicos/saúde)
+        pred_idx = -1
+        for i, t in enumerate(doc):
+            if is_verb_like_token(t):
                 pred = t.text
-            elif ("obj" in t.dep_ or "obl" in t.dep_) and not obj:
-                obj = " ".join(w.text for w in t.subtree).strip()
+                pred_idx = i
+                break
+
+        if pred_idx != -1:
+            subj_tokens = [doc[i].text for i in range(pred_idx)]
+            obj_tokens = [doc[i].text for i in range(pred_idx + 1, len(doc))]
+            subj = " ".join(subj_tokens).strip()
+            obj = " ".join(obj_tokens).strip()
+
+        if not pred:
+            for t in doc:
+                if "subj" in t.dep_ and not subj:
+                    subj = " ".join(w.text for w in t.subtree).strip()
+                elif t.pos_ in ("VERB", "AUX") and not pred:
+                    pred = t.text
+                elif ("obj" in t.dep_ or "obl" in t.dep_) and not obj:
+                    obj = " ".join(w.text for w in t.subtree).strip()
 
         return {
             "subject": subj or "Sujeito",
@@ -196,9 +249,9 @@ class SpacyPreprocessor:
             return entities, False
 
         doc = self.nlp(text)
-        has_verb = any(t.pos_ in ("VERB", "AUX") for t in doc) or any(t.dep_ in ("nsubj", "nsubj:pass") for t in doc)
+        has_verb = any(is_verb_like_token(t) for t in doc) or any(t.dep_ in ("nsubj", "nsubj:pass") for t in doc)
         has_content = any(t.pos_ in ("NOUN", "PROPN", "NUM") for t in doc) or any(entities.values())
-        has_min_length = len(doc) >= 3
+        has_min_length = len(doc) >= 2
 
         is_viable = has_verb and has_content and has_min_length
         return entities, is_viable

@@ -221,6 +221,25 @@ async def test_claim_extractor_opinion_and_noise_filtering():
 
 
 @pytest.mark.asyncio
+async def test_claim_extractor_health_factual_claims():
+    """Garante que alegações de saúde concisas e populares sejam reconhecidas como factuais e checáveis."""
+    from app.analyzers.claim_extractor import ClaimExtractorAnalyzer
+    extractor = ClaimExtractorAnalyzer()
+
+    health_claims = [
+        "Água com limão emagrece",
+        "Chá de boldo cura gastrite",
+        "Vacina mata",
+        "Café engorda",
+    ]
+
+    for claim in health_claims:
+        result = await extractor.analyze(claim, [])
+        assert result.claim is not None, f"Esperava alegação extraída para '{claim}', mas retornou None"
+        assert result.raw_details["claims_found"] >= 1, f"Falha ao encontrar proposição para '{claim}'"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_claim_propagation():
     """Verifica se o Orchestrator utiliza a claim extraída pelo ClaimExtractor."""
     from app.config import Settings

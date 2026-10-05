@@ -303,7 +303,10 @@ class HealthLocalKB:
             "paciente", "pacientes", "centro", "estado", "cidade", "ranking", "lista", "total",
             "melhor", "melhores", "pior", "piores", "concentra", "concentram", "concentração",
             "número", "todos", "todas", "primeiro", "último", "ano", "anos", "dia", "dias",
-            "meses", "taxa", "índice", "população", "serviço", "serviços", "público", "públicos"
+            "meses", "taxa", "índice", "população", "serviço", "serviços", "público", "públicos",
+            "água", "agua", "limão", "limao", "café", "cafe", "chá", "cha", "suco", "sucos",
+            "leite", "comida", "alimento", "alimentos", "dieta", "dietas", "fruta", "frutas",
+            "legume", "legumes", "açúcar", "acucar", "sal", "gordura", "corpo", "peso"
         }
 
         for token in tokens:
