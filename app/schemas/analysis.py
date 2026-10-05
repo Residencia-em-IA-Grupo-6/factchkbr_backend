@@ -32,6 +32,17 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description="ID do chat no Telegram"
     )
+    deliver_to_telegram: bool = Field(
+        default=False,
+        description="Se True e chat_id estiver presente, entrega o resultado diretamente no Telegram"
+    )
+
+
+class TelegramDeliveryStatus(BaseModel):
+    """Status da entrega de mensagem diretamente ao Telegram."""
+    delivered: bool = Field(..., description="Indica se a mensagem foi enviada com sucesso ao Telegram")
+    message_id: int | None = Field(default=None, description="ID da mensagem retornada pelo Telegram")
+    error: str | None = Field(default=None, description="Mensagem de erro caso a entrega tenha falhado")
 
 
 class SubClaimAnalysis(BaseModel):
@@ -90,6 +101,14 @@ class AnalyzeResponse(BaseModel):
     sub_claims: list[SubClaimAnalysis] = Field(
         default_factory=list,
         description="Checagem discriminada por proposição atômica identificada no texto"
+    )
+    telegram_formatted_text: str | None = Field(
+        default=None,
+        description="Texto formatado em HTML enriquecido pronto para envio e exibição no Telegram"
+    )
+    telegram_delivery: TelegramDeliveryStatus | None = Field(
+        default=None,
+        description="Status de entrega da mensagem no Telegram (caso solicitado/configurado)"
     )
 
     @field_validator("confidence", mode="before")

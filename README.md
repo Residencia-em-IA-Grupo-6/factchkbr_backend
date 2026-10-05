@@ -125,6 +125,31 @@ O `FactCheckOrchestrator` carregará e executará automaticamente o novo modelo 
 
 > **Vereditos permitidos:** `VERDADEIRO`, `FAKE`, `SUSPEITO`, `INCONCLUSIVO`.
 
+---
+
+## 🤖 Integração com Bot do Telegram
+
+O backend está preparado para **receber e entregar mensagens diretamente ao Telegram**, suportando dois modos de operação:
+
+### Modo 1: Webhook Nativo do Telegram (`POST /api/telegram/webhook`)
+Configure o Webhook diretamente no Telegram apontando para o seu backend. Quando um usuário enviar uma mensagem ou comando:
+1. O backend responde imediatamente `200 OK` ao Telegram (evitando timeout de 2s).
+2. O bot envia um aviso proativo (`⏳ FactChkBR: Analisando sua mensagem...`) e ativa o indicador de *digitando* (`typing`).
+3. O orquestrador executa a checagem completa de saúde (Anvisa, ClinicalTrials, agências IFCN, Plumb-4B).
+4. O bot entrega a resposta final formatada em HTML enriquecido com emojis de semáforo, barra visual de confiança, justificativa e fontes.
+
+#### Endpoints de Gestão do Telegram:
+- **`POST /api/telegram/webhook`**: Endpoint que recebe os updates da Telegram Bot API.
+- **`POST /api/telegram/send`**: Entrega direta de mensagens manuais para um `chat_id`.
+- **`POST /api/telegram/set-webhook`**: Registra sua URL HTTPS junto aos servidores do Telegram (`{"url": "https://seu-dominio/api/telegram/webhook"}`).
+- **`GET /api/telegram/webhook-info`**: Consulta o status do webhook cadastrado no Telegram.
+- **`POST /api/telegram/delete-webhook`**: Remove o webhook (caso queira usar polling local).
+
+### Modo 2: Consumo via API REST (`POST /api/analyze`)
+Se você possui um bot externo ou microsserviço que consome a API:
+- O payload de retorno inclui o campo `telegram_formatted_text` já pronto para envio via `bot.send_message(chat_id, text, parse_mode="HTML")`.
+- Se você enviar `chat_id` e `deliver_to_telegram: true` no JSON de `/api/analyze`, o próprio backend realiza a entrega e retorna o status em `telegram_delivery`.
+
 ### `GET /health` e `GET /api/health`
 
 Retorna o status da aplicação e a lista de analisadores ativos e disponíveis:
@@ -136,6 +161,7 @@ Retorna o status da aplicação e a lista de analisadores ativos e disponíveis:
   "available_analyzers": ["fact_check_api", "heuristic", "llm_judge"]
 }
 ```
+
 
 ---
 

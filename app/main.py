@@ -10,6 +10,7 @@ from app.core.registry import registry
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Ciclo de vida: inicializa descoberta de analisadores e gerencia o ciclo do orquestrador."""
+    from app.services.telegram_service import get_telegram_service
     registry.auto_discover("app.analyzers")
     orchestrator = FactCheckOrchestrator(settings=get_settings())
     # Pré-carrega analisadores ativos
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await orchestrator.aclose()
+        await get_telegram_service().aclose()
 
 
 def create_app() -> FastAPI:

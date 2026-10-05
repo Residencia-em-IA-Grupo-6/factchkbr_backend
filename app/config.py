@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
 
+    # Integração com Bot do Telegram (Recebimento via Webhook e Entrega de Mensagens)
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_WEBHOOK_SECRET: str | None = None
+    TELEGRAM_API_BASE_URL: str = "https://api.telegram.org"
+    TELEGRAM_AUTO_REPLY: bool = True
+
     def get_llm_endpoint(self) -> str:
         """Retorna a URL de chat completions compatível com OpenAI."""
         if self.LLM_PROVIDER.lower() == "ollama":
