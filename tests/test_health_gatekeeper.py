@@ -74,6 +74,13 @@ def test_heuristic_approval_biomedical_and_sanitary(gatekeeper: HealthTopicGatek
     assert decision3 is not None
     assert decision3.allows_verification is True
 
+    text4 = "Cientistas descobriram que bananas muito maduras produzem um composto que destrói células cancerígenas"
+    decision4 = gatekeeper.evaluate_heuristic(text4)
+    assert decision4 is not None
+    assert decision4.allows_verification is True
+    assert decision4.is_health_topic is True
+    assert decision4.category == "BIOMEDICAL_HEALTH"
+
 
 @pytest.mark.asyncio
 async def test_gatekeeper_caching(gatekeeper: HealthTopicGatekeeper):

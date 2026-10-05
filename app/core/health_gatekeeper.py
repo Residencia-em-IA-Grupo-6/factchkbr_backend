@@ -20,6 +20,10 @@ HEALTH_TERMS: set[str] = {
     # Doenças, patologias e sintomas
     "dengue", "covid", "covid-19", "coronavírus", "coronavirus", "sars", "sars-cov-2",
     "gripe", "influenza", "h1n1", "câncer", "cancer", "tumor", "tumores", "carcinoma",
+    "cancerígeno", "cancerígenos", "cancerígena", "cancerígenas", "cancerigeno", "cancerigena",
+    "célula", "células", "células cancerígenas", "célula cancerígena", "células tumorais", "célula tumoral",
+    "oncológico", "oncológica", "oncológicos", "oncológicas", "oncologia", "oncologista",
+    "metástase", "metastase", "leucemia", "linfoma", "melanoma",
     "infarto", "avc", "derrame", "diabetes", "diabético", "diabética", "hipertensão",
     "autismo", "autista", "alzheimer", "parkinson", "hiv", "aids", "hepatite",
     "tuberculose", "pneumonia", "varíola", "variola", "mpox", "malária", "malaria",
@@ -34,11 +38,13 @@ HEALTH_TERMS: set[str] = {
     "síndrome", "sindrome", "sequela", "sequelas", "mortalidade", "óbito", "obito",
     "dor no peito", "arritmia", "insuficiência renal", "cirrose",
 
-    # Vacinas, imunização e biologia
+    # Vacinas, imunização, biologia celular e antienvelhecimento
     "vacina", "vacinas", "vacinação", "vacinacao", "imunização", "imunizacao",
     "imunizante", "imunizantes", "vacinado", "vacinada", "vacinados", "vacinadas",
     "anticorpo", "anticorpos", "imunidade", "imunológico", "imunologico", "dna", "rna",
     "microchip na vacina", "efeito da vacina", "reação da vacina",
+    "rejuvenescimento", "rejuvenescer", "antienvelhecimento", "rugas", "linhas de expressão",
+    "flacidez", "bigode chinês", "colágeno", "colageno", "antioxidante", "antioxidantes",
 
     # Medicamentos, fármacos, terapias e toxicologia
     "remédio", "remedio", "remédios", "remedios", "medicamento", "medicamentos",
@@ -52,7 +58,8 @@ HEALTH_TERMS: set[str] = {
     "posologia", "dosagem", "dose", "doses", "efeito colateral", "efeitos colaterais",
     "efeito adverso", "reação adversa", "adulterado", "adulterada", "contaminado",
     "contaminada", "contaminação", "contaminacao", "intoxicação", "intoxicacao",
-    "veneno", "tóxico", "toxico", "letal", "bula", "substância",
+    "veneno", "tóxico", "toxico", "letal", "bula", "substância", "substâncias",
+    "destrói células", "destroi celulas", "combate o câncer", "cura do câncer",
 
     # Autoridades Sanitárias, Clínicas e Profissionais de Saúde
     "anvisa", "sus", "oms", "who", "fiocruz", "butantan", "instituto butantan",
@@ -68,12 +75,38 @@ HEALTH_TERMS: set[str] = {
 # Subconjunto de termos estritamente biomédicos/farmacológicos específicos
 # (usado para diferenciar se há alegação médica substantiva mesmo citando político)
 SPECIFIC_BIOMEDICAL_TERMS: set[str] = {
-    "vacina", "vacinas", "vacinação", "dengue", "covid", "coronavírus", "câncer",
-    "infarto", "avc", "autismo", "ivermectina", "cloroquina", "hidroxicloroquina",
-    "dipirona", "paracetamol", "antibiótico", "adulterado", "contaminado", "intoxicação",
-    "anvisa", "cura", "efeito colateral", "efeito adverso", "trombose", "miocardite",
-    "oropouche", "zika", "chikungunya", "sarampo", "remédio", "medicamento", "quimioterapia"
+    "vacina", "vacinas", "vacinação", "dengue", "covid", "coronavírus", "câncer", "cancer",
+    "cancerígeno", "cancerígena", "cancerígenas", "cancerígenos", "células cancerígenas",
+    "tumor", "tumores", "rejuvenescimento", "infarto", "avc", "autismo", "ivermectina",
+    "cloroquina", "hidroxicloroquina", "dipirona", "paracetamol", "antibiótico",
+    "adulterado", "contaminado", "intoxicação", "anvisa", "cura", "efeito colateral",
+    "efeito adverso", "trombose", "miocardite", "oropouche", "zika", "chikungunya",
+    "sarampo", "remédio", "medicamento", "quimioterapia"
 }
+
+# Padrões morfossintáticos de termos biomédicos derivados
+RE_BIOMEDICAL_PATTERNS = re.compile(
+    r"\b(?:"
+    r"cancer[ií]gen[oa]s?|oncol[oó]gic[oa]s?|tumora[li]s?|"
+    r"c[eé]lulas?\s+(?:cancer[ií]genas?|tumorais?|malignas?|doentes?)|"
+    r"rejuvenesc\w+|antienvelhec\w+|"
+    r"imunol[oó]gic\w+|antioxidant\w+|"
+    r"antibi[oó]tic\w+|anti[-]?inflamat[oó]ri\w+|"
+    r"quimioter[aá]p\w+|radioter[aá]p\w+|"
+    r"patog[eê]nic\w+|infecci[oó]s\w+|"
+    r"terap[eê]utic\w+|farmacol[oó]gic\w+"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Indícios léxicos de afirmações científicas/laboratoriais/nutricionais que merecem análise
+RE_SCIENTIFIC_RESEARCH_CUES = re.compile(
+    r"\b(?:"
+    r"cientistas?|pesquisador(?:es|as?)?|pesquisas?|estudos?|laborat[oó]ri[oa]s?|"
+    r"descobertas?|descobriram|compostos?|subst[aâ]ncias?|extratos?|propriedades?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 # Figuras públicas e papéis políticos
 RE_POLITICAL_FIGURES = re.compile(
@@ -184,9 +217,17 @@ class HealthTopicGatekeeper:
         """
         norm = text.lower()
         matched_health = [t for t in HEALTH_TERMS if re.search(rf"\b{re.escape(t)}\b", norm)]
+        biomedical_regex_matches = [m.group(0) for m in RE_BIOMEDICAL_PATTERNS.finditer(norm)]
+        if biomedical_regex_matches:
+            matched_health.extend(biomedical_regex_matches)
 
-        # 1. Se não houver NENHUM sinal léxico de saúde -> FORA DE ESCOPO imediato
+        # 1. Se não houver NENHUM sinal léxico de saúde nem padrão biomédico
         if not matched_health:
+            # Se contiver termos científicos/laboratoriais (ex: cientistas, pesquisa, descoberta, composto),
+            # não descarta sumariamente: delega para que o LLM analise semântica e contextualmente
+            if RE_SCIENTIFIC_RESEARCH_CUES.search(norm):
+                return None
+
             return HealthGatekeeperDecision(
                 is_health_topic=False,
                 is_political_polemic=False,
@@ -200,6 +241,8 @@ class HealthTopicGatekeeper:
         has_speech_verb = bool(RE_SPEECH_VERBS.search(norm))
         has_pol_rhetoric = bool(RE_POLITICAL_RHETORIC_CONTEXT.search(norm))
         matched_biomedical = [t for t in SPECIFIC_BIOMEDICAL_TERMS if re.search(rf"\b{re.escape(t)}\b", norm)]
+        if biomedical_regex_matches:
+            matched_biomedical.extend(biomedical_regex_matches)
 
         # 2. Polêmica política com o termo 'saúde' sem conteúdo biomédico concreto
         # Exemplo: "Lula diz que saúde é para quem pode pagar, quem não pode que morra no esquecimento"
@@ -215,15 +258,20 @@ class HealthTopicGatekeeper:
                 )
 
         # 3. Fato sanitário ou biomédico claro sem qualquer elemento político
-        # Exemplo: "Vacina da dengue reduz internações", "Anvisa proibiu lote de azeite adulterado"
+        # Exemplo: "Vacina da dengue reduz internações", "Bananas maduras destroem células cancerígenas"
         if matched_biomedical and not has_political_fig and not has_pol_rhetoric:
+            is_biomed = any(
+                b in ("vacina", "vacinas", "dengue", "câncer", "cancer", "infarto", "remédio", "medicamento", "cancerígeno", "cancerígena", "cancerígenas", "células cancerígenas", "rejuvenescimento")
+                or RE_BIOMEDICAL_PATTERNS.search(b)
+                for b in matched_biomedical
+            )
             return HealthGatekeeperDecision(
                 is_health_topic=True,
                 is_political_polemic=False,
                 allows_verification=True,
-                category="BIOMEDICAL_HEALTH" if any(b in ("vacina", "dengue", "câncer", "infarto", "remédio") for b in matched_biomedical) else "PUBLIC_HEALTH",
+                category="BIOMEDICAL_HEALTH" if is_biomed else "PUBLIC_HEALTH",
                 reason="A alegação trata de tema biomédico ou sanitário substantivo passível de validação científica.",
-                matched_signals=matched_biomedical[:4],
+                matched_signals=list(dict.fromkeys(matched_biomedical))[:4],
             )
 
         # Casos com sobreposição ou ambiguidade: requer validação semântica LLM
