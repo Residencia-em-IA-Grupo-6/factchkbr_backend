@@ -50,15 +50,21 @@ def test_telegram_format_analysis_html():
 
     formatted = service.format_analysis_for_telegram(analysis)
 
-    assert "FACTCHKBR - VERIFICAÇÃO FACTUAL" in formatted
-    assert "❌ <b>FAKE / BOATO</b>" in formatted
-    assert "85.0%" in formatted
+    assert "FACTCHKBR • CHECAGEM DE INFORMAÇÃO" in formatted
+    assert "❌ <b>É FALSO (BOATO)</b>" in formatted
+    assert "85%" in formatted
     assert "Água com limão emagrece em 3 dias" in formatted
-    assert "A alegação não possui comprovação científica" in formatted
-    assert "Detalhamento por Alegação" in formatted
-    assert "Principais Fundamentos" in formatted
-    assert "Fontes Consultadas" in formatted
-    assert "https://saude.abril.com.br" in formatted
+    assert "Pontos analisados:" in formatted
+    assert "O que você precisa saber:" in formatted
+    assert "Fontes consultadas" in formatted
+    # Todas as fontes devem ter links HTML clicáveis
+    assert '<a href="https://saude.abril.com.br/nutricao/agua-com-limao-emagrece">' in formatted
+    assert '<a href="https://consultas.anvisa.gov.br/#/medicamentos/q/">' in formatted
+    # Não deve conter termos em inglês ou jargões
+    assert "FAKE / BOATO" not in formatted
+    assert "Plumb-4B" not in formatted
+    assert "LLM" not in formatted
+    assert "ônus da prova" not in formatted
 
 
 def test_telegram_format_html_escaping():
@@ -144,7 +150,7 @@ async def test_telegram_process_start_command():
         mock_send.assert_called_once()
         args, kwargs = mock_send.call_args
         assert kwargs["chat_id"] == 12345
-        assert "Seja bem-vindo ao FactChkBR" in kwargs["text"]
+        assert "bem-vindo ao FactChkBR" in kwargs["text"]
         # /start não deve acionar o orquestrador pesado
         mock_orchestrator.analyze.assert_not_called()
 
@@ -191,8 +197,8 @@ async def test_telegram_process_health_claim_update():
         assert mock_send.call_count == 2
         # A última mensagem é o veredito formatado
         last_call_text = mock_send.call_args_list[-1][1]["text"]
-        assert "FACTCHKBR - VERIFICAÇÃO FACTUAL" in last_call_text
-        assert "FAKE / BOATO" in last_call_text
+        assert "FACTCHKBR • CHECAGEM DE INFORMAÇÃO" in last_call_text
+        assert "É FALSO (BOATO)" in last_call_text
 
 
 def test_telegram_webhook_endpoint_security():
@@ -250,5 +256,27 @@ def test_analyze_endpoint_returns_telegram_formatted_text():
 
     assert "telegram_formatted_text" in data
     assert data["telegram_formatted_text"] is not None
-    assert "FACTCHKBR - VERIFICAÇÃO FACTUAL" in data["telegram_formatted_text"]
-    assert "Veredito:" in data["telegram_formatted_text"]
+    assert "FACTCHKBR • CHECAGEM DE INFORMAÇÃO" in data["telegram_formatted_text"]
+    assert "Resultado:" in data["telegram_formatted_text"]
+
+
+def test_telegram_sources_always_have_clickable_links():
+    """Garante que todas as fontes exibidas na mensagem possuam link clicável HTML."""
+    service = TelegramService()
+
+    # Caso com fontes genéricas sem link no original
+    analysis = AnalyzeResponse(
+        claim="Chá de folhas de louro cura artrose",
+        verdict=Verdict.FAKE,
+        confidence=0.88,
+        summary="Não há registro em estudos médicos que comprove cura de artrose por chá de louro.",
+        reasons=["Não há evidências de cura."],
+        sources=["Anvisa", "Ministério da Saúde", "Organização Mundial da Saúde"],
+    )
+
+    formatted = service.format_analysis_for_telegram(analysis)
+    assert "Fontes consultadas (clique no link para acessar):" in formatted
+    # Todas as fontes devem ter tag <a> com href
+    assert '<a href="https://consultas.anvisa.gov.br/#/medicamentos/q/">Anvisa' in formatted
+    assert '<a href="https://www.gov.br/saude/pt-br">Ministério da Saúde' in formatted
+    assert '<a href="https://www.who.int/pt">Organização Mundial da Saúde' in formatted
