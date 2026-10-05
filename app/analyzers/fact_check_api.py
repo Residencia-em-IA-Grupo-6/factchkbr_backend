@@ -95,6 +95,11 @@ TIER2_HOST_SUFFIXES = (
     "ebc.com.br", "valor.globo.com", "valorinveste.globo.com",
     "nexojornal.com.br", "metropoles.com", "terra.com.br",
     "dw.com", "elpais.com",
+    # Grandes veículos editoriais e de imprensa nacional
+    "abril.com.br", "veja.abril.com.br", "vejasp.abril.com.br", "exame.com",
+    "r7.com", "correiobraziliense.com.br", "cartacapital.com.br",
+    "jovempan.com.br", "poder360.com.br", "congressoemfoco.com.br",
+    "sbtnews.com.br", "band.uol.com.br", "band.com.br",
 )
 
 TIER1_SOURCE_NAMES = {
@@ -110,6 +115,9 @@ TIER2_SOURCE_NAMES = {
     "g1", "o globo", "globo", "folha de s.paulo", "folha", "estadão", "estadao",
     "uol", "bbc news brasil", "bbc", "cnn brasil", "cnn", "reuters",
     "agência brasil", "ebc", "valor econômico", "nexo jornal", "metrópoles", "metropoles", "terra",
+    "veja", "veja são paulo", "veja sp", "veja rio", "abril", "exame", "r7",
+    "correio braziliense", "correio brasiliense", "carta capital", "jovem pan",
+    "poder360", "congresso em foco", "sbt news", "sbt", "band",
 }
 
 STOP_WORDS_PT = {
@@ -146,7 +154,15 @@ CONFIRM_TITLE_PATTERNS = re.compile(
     r"confirma|confirmou|aprova|aprovou|autoriza|autorizou|determina|determinou|"
     r"proíbe|proibiu|suspende|suspendeu|recolhe|recolhimento|anuncia|anunciou|"
     r"sanciona|sancionou|publica|publicou|pode ser utilizad[oa]|passa a valer|"
-    r"passam a valer|servirá como|valerá como|é verdade|é fato|comprova|comprovou"
+    r"passam a valer|servirá como|valerá como|é verdade|é fato|comprova|comprovou|"
+    r"lamenta|lamentou|lamento|pesar|nota de pesar|pesar pelo falecimento|"
+    r"morre|morreu|morte|falecimento|falece|faleceu|"
+    r"emite nota|emitiu nota|manifesta|manifestou|divulga|divulgou|informa|informou|"
+    r"alerta|alertou|comunica|comunicou|declara|declarou|registra|registrou|"
+    r"lança|lançou|inicia|iniciou|atinge|atingiu|assina|assinou|decreta|decretou|"
+    r"entrega|entregou|recomenda|recomendou|presta homenagem|homenageia|homenageou|"
+    r"interdita|interditou|autua|autuou|apreende|apreendeu|reconhece|reconheceu|"
+    r"concede|concedeu|destaca|destacou|reforça|reforçou"
     r")\b",
     re.IGNORECASE,
 )
@@ -211,26 +227,28 @@ def get_source_tier(source_name: str, url: str = "", is_fact_check: bool = False
     if any(s_clean == fc or re.search(rf"\b{re.escape(fc)}\b", s_clean) for fc in TIER1_FACT_CHECK_NAMES):
         return SourceTier.TIER1_OFFICIAL_OR_IFCN
 
-    # 2. Validação por domínio qualificado (evita spoofing por substring no path ou query)
-    if host:
-        if any(host == d or host.endswith("." + d) for d in TIER1_HOST_SUFFIXES):
-            return SourceTier.TIER1_OFFICIAL_OR_IFCN
-        if any(host == d or host.endswith("." + d) for d in TIER2_HOST_SUFFIXES):
-            return SourceTier.TIER2_MAINSTREAM_MEDIA
-
-        # Se a URL existe mas não pertence aos domínios confiáveis oficiais/IFCN, classifica como Tier 3 se TLD jornalístico
-        if any(host.endswith(tld) for tld in (".com.br", ".org.br", ".edu.br", ".net.br")):
+    # 2. Validação para agregadores (ex: Google News RSS com links em news.google.com)
+    is_aggregator = host in ("news.google.com", "google.com", "news.google.com.br")
+    if not host or is_aggregator:
+        for t1 in TIER1_SOURCE_NAMES:
+            if s_clean == t1 or re.search(rf"\b{re.escape(t1)}\b", s_clean):
+                return SourceTier.TIER1_OFFICIAL_OR_IFCN
+        for t2 in TIER2_SOURCE_NAMES:
+            if s_clean == t2 or re.search(rf"\b{re.escape(t2)}\b", s_clean):
+                return SourceTier.TIER2_MAINSTREAM_MEDIA
+        if s_clean:
             return SourceTier.TIER3_GENERAL_MEDIA
         return SourceTier.UNKNOWN
 
-    # 3. Validação por nome de fonte reconhecida quando URL não fornecida (ex: mocks de teste)
-    for t1 in TIER1_SOURCE_NAMES:
-        if s_clean == t1 or re.search(rf"\b{re.escape(t1)}\b", s_clean):
-            return SourceTier.TIER1_OFFICIAL_OR_IFCN
-    for t2 in TIER2_SOURCE_NAMES:
-        if s_clean == t2 or re.search(rf"\b{re.escape(t2)}\b", s_clean):
-            return SourceTier.TIER2_MAINSTREAM_MEDIA
+    # 3. Validação por domínio qualificado (evita spoofing por substring no path ou query)
+    if any(host == d or host.endswith("." + d) for d in TIER1_HOST_SUFFIXES):
+        return SourceTier.TIER1_OFFICIAL_OR_IFCN
+    if any(host == d or host.endswith("." + d) for d in TIER2_HOST_SUFFIXES):
+        return SourceTier.TIER2_MAINSTREAM_MEDIA
 
+    # Se a URL existe mas não pertence aos domínios confiáveis oficiais/IFCN, classifica como Tier 3 se TLD jornalístico
+    if any(host.endswith(tld) for tld in (".com.br", ".org.br", ".edu.br", ".net.br")):
+        return SourceTier.TIER3_GENERAL_MEDIA
     return SourceTier.UNKNOWN
 
 

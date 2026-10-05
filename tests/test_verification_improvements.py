@@ -439,3 +439,103 @@ def test_claim_extractor_language_safeguard():
     assert bool(ENGLISH_WORDS_PATTERN.search(english_text)) is True
     assert bool(ENGLISH_WORDS_PATTERN.search(portuguese_text)) is False
 
+
+def test_fact_check_api_stance_detection_on_declarative_reporting():
+    """Valida que matérias jornalísticas reportando o fato (ex: nota de pesar, lamento oficial) são reconhecidas como confirmatórias."""
+    analyzer = FactCheckApiAnalyzer()
+    claim = "O Ministério da Saúde lamenta o falecimento de Paulo Roberto Teixeira"
+
+    evidences = [
+        EvidenceItem(
+            title="Ministério da Saúde lamenta morte de Paulo Roberto Teixeira e destaca legado decisivo na resposta brasileira ao HIV e à aids - Agência Aids",
+            source_name="Agência Aids",
+            url="https://agenciaaids.com.br/noticia/ministerio-da-saude-lamenta-morte-de-paulo-roberto-teixeira/",
+            snippet="O Ministério da Saúde manifestou profundo pesar pelo falecimento de Paulo Roberto Teixeira...",
+            source_tier=SourceTier.TIER2_MAINSTREAM_MEDIA.value,
+        ),
+        EvidenceItem(
+            title="Morre Paulo Roberto Teixeira, médico pioneiro no combate à Aids - VEJA SÃO PAULO",
+            source_name="VEJA SÃO PAULO",
+            url="https://vejasp.abril.com.br/cidades/morre-paulo-roberto-teixeira-medico-aids/",
+            snippet="O Ministério da Saúde emitiu nota de pesar lamentando o falecimento...",
+            source_tier=SourceTier.TIER2_MAINSTREAM_MEDIA.value,
+        ),
+    ]
+
+    verdict, confidence, reasons = analyzer.evaluate_verdict(evidences, claim=claim)
+    assert verdict == Verdict.VERDADEIRO
+    assert confidence >= 0.85
+    assert any(ev.stance == "SUPPORTS" for ev in evidences)
+
+
+def test_consolidation_preserves_confirmed_verdict_when_evidences_support():
+    """Valida que o orquestrador não rebaixa alegações confirmadas por fontes jornalísticas para inconclusivas."""
+    orchestrator = FactCheckOrchestrator()
+    claim = "O Ministério da Saúde lamenta o falecimento de Paulo Roberto Teixeira"
+
+    fc_result = AnalyzerResult(
+        analyzer_name="fact_check_api",
+        verdict=Verdict.VERDADEIRO,
+        confidence=0.89,
+        claim=claim,
+        reasons=["Leitura horizontal (Agência Aids): confirmação em notícia."],
+        sources=["Agência Aids", "VEJA SÃO PAULO"],
+        raw_details={
+            "evidences": [
+                {
+                    "title": "Ministério da Saúde lamenta morte de Paulo Roberto Teixeira",
+                    "source_name": "Agência Aids",
+                    "url": "https://agenciaaids.com.br/...",
+                    "source_tier": "tier2_mainstream_media",
+                    "stance": "SUPPORTS",
+                    "is_relevant": True,
+                },
+                {
+                    "title": "Morre Paulo Roberto Teixeira, médico pioneiro - VEJA SÃO PAULO",
+                    "source_name": "VEJA SÃO PAULO",
+                    "url": "https://vejasp.abril.com.br/...",
+                    "source_tier": "tier2_mainstream_media",
+                    "stance": "SUPPORTS",
+                    "is_relevant": True,
+                },
+            ],
+            "sub_claims": [
+                {
+                    "statement": claim,
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.89,
+                    "justification": "Confirmado por reportagens da imprensa.",
+                }
+            ],
+        },
+    )
+
+    judge_result = AnalyzerResult(
+        analyzer_name="llm_judge",
+        verdict=Verdict.VERDADEIRO,
+        confidence=0.95,
+        claim=claim,
+        summary="Alegação sobre o lamento do Ministério da Saúde pelo falecimento de Paulo Roberto Teixeira é comprovada como verdadeira com base em várias fontes noticiosas.",
+        reasons=["O Ministério da Saúde expressou pesar pelo falecimento."],
+        sources=["VEJA SÃO PAULO", "Agência Aids"],
+        raw_details={
+            "sub_claims": [
+                {
+                    "statement": claim,
+                    "verdict": Verdict.VERDADEIRO,
+                    "confidence": 0.95,
+                    "justification": "A notícia do VEJA SÃO PAULO confirma diretamente o pesar oficial.",
+                }
+            ]
+        },
+    )
+
+    resp = orchestrator._consolidate(claim, [fc_result, judge_result])
+    assert resp.verdict == Verdict.VERDADEIRO
+    assert resp.confidence >= 0.85
+    assert "ausência de referências" not in resp.summary.lower()
+    assert len(resp.sub_claims) == 1
+    assert resp.sub_claims[0].verdict == Verdict.VERDADEIRO
+    assert "ausência de referências" not in resp.sub_claims[0].justification.lower()
+
+

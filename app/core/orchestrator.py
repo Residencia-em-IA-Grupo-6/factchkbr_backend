@@ -293,6 +293,7 @@ class FactCheckOrchestrator:
         # Verifica se há desmentido factual ou confirmação comprovada nas evidências globais ou sub-alegações
         has_debunk = False
         has_confirm = False
+        evidences: list[dict[str, Any]] = []
         if fc_res:
             evidences = (fc_res.raw_details or {}).get("evidences", [])
             has_debunk = (
@@ -312,7 +313,7 @@ class FactCheckOrchestrator:
                 or any(
                     ((e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado") and e.get("stance") != "REFUTES")
                      or e.get("stance") == "SUPPORTS")
-                    and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
+                    and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media", "tier3_general_media")
                     for e in evidences
                 )
                 or any(
@@ -320,6 +321,21 @@ class FactCheckOrchestrator:
                     for sc in fc_sub_claims
                 )
             )
+
+        # Se o LLM Judge (com fundamentação e fontes) concluiu VERDADEIRO,
+        # havendo matérias relevantes em fontes consultadas e sem desmentido registrado:
+        if not has_confirm and judge_res and judge_res.verdict == Verdict.VERDADEIRO and not has_debunk:
+            if evidences and any(e.get("is_relevant", True) for e in evidences):
+                has_confirm = True
+            elif judge_res.sources and any(
+                s not in (
+                    "Heurística Textual FactChkBR (Base: FACTCKBR)",
+                    "Extrator FactChkBR (spaCy Gatekeeper + LLM Structured Outputs)",
+                    "Filtro de Escopo Temático FactChkBR (Saúde Pública e Biomedicina)",
+                )
+                for s in judge_res.sources
+            ):
+                has_confirm = True
 
         consolidated_sub_claims: list[SubClaimAnalysis] = []
         base_sub_claims = judge_sub_claims if len(judge_sub_claims) >= len(fc_sub_claims) and judge_sub_claims else fc_sub_claims
@@ -367,13 +383,16 @@ class FactCheckOrchestrator:
                         f_confirm = any(
                             ((e.get("rating") in ("Verdadeiro", "Fato", "Verdade", "Comprovado") and e.get("stance") != "REFUTES")
                              or e.get("stance") == "SUPPORTS")
-                            and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media")
+                            and e.get("source_tier") in ("tier1_official_or_ifcn", "tier2_mainstream_media", "tier3_general_media")
                             for e in f_evs
                         )
 
                 if len(base_sub_claims) == 1:
                     f_debunk = f_debunk or has_debunk
                     f_confirm = f_confirm or has_confirm
+                elif not f_confirm and has_confirm and not f_debunk:
+                    if j_match and j_match.get("verdict") in (Verdict.VERDADEIRO, "VERDADEIRO"):
+                        f_confirm = True
 
                 # Determina confiança
                 sub_c = 0.80
@@ -451,10 +470,10 @@ class FactCheckOrchestrator:
                     filtered_reasons.append(
                         "Prevalência de checagem oficial: fontes jornalísticas/IFCN de desmentido têm precedência probatória sobre confirmação divergente."
                     )
-                # Prevalência de comprovação oficial: se há confirmação documental e o outro decisor não tem desmentido
-                elif has_confirm and fc_res and fc_res.verdict == Verdict.VERDADEIRO and not has_debunk:
+                # Prevalência de comprovação oficial/jornalística: se há confirmação documental e sem desmentido
+                elif has_confirm and not has_debunk and any(r.verdict == Verdict.VERDADEIRO for r in valid_conclusive):
                     dominant_verdict = Verdict.VERDADEIRO
-                    final_confidence = fc_res.confidence
+                    final_confidence = max(r.confidence for r in valid_conclusive if r.verdict == Verdict.VERDADEIRO)
                     filtered_reasons.append(
                         "Confirmação por fontes oficiais e órgãos de referência com base documental comprovada."
                     )
