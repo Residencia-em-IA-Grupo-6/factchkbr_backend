@@ -272,8 +272,27 @@ Sua responsabilidade é analisar o texto recebido de redes sociais ou fontes pú
 ### REQUISITOS FUNDAMENTAIS:
 - IDIOMA ESTRITAMENTE EM PORTUGUÊS (pt-BR): Todos os campos ('primary_claim', 'statement', 'triple.subject', 'triple.predicate', 'triple.object') DEVEM ser mantidos rigorosamente em PORTUGUÊS (pt-BR). É expressamente PROIBIDO traduzir termos para o inglês ou qualquer outro idioma.
 - FIDELIDADE LEXICAL: NÃO invente palavras, neologismos ou sufixos inexistentes (ex: NUNCA altere "emagrece" para "emagessa" ou "limonete"). Preserve exatamente o vocabulário e a grafia das palavras do texto original em português.
-- PRESERVAÇÃO DENOTATIVA: Mantenha a alegação central expressa em português de forma clara, denotativa e fiel ao sentido pretendido. Se o texto for "É falso que voto não pode ser usado no INSS", a primary_claim deve ser em português (ex: "É falso que voto não pode ser usado no INSS" ou "O voto não pode ser utilizado como prova de vida do INSS"), NUNCA gere frases em inglês como "voting can be used in INSS".
+- PRESERVAÇÃO DENOTATIVA: Mantenha a alegação central expressa em português de forma clara, denotativa e fiel ao sentido pretendido.
 - COMPLETUDE DAS ASSERÇÕES: Cada asserção ('statement') DEVE ser uma oração completa e inteligível (ex: 'É falso que o voto não pode ser usado no INSS'). NUNCA retorne fragmentos incompletos como apenas 'É falso' ou 'Não procede'.
+- ESTRUTURA DO JSON DE RESPOSTA:
+Responda OBRIGATORIAMENTE em JSON válido contendo o array 'assertions':
+{
+  "primary_claim": "Texto conciso da alegação central a ser checada",
+  "assertions": [
+    {
+      "id": 1,
+      "statement": "Oração completa da proposição factual",
+      "category": "FACTUAL_CLAIM",
+      "triple": {
+        "subject": "sujeito",
+        "predicate": "predicado verbal",
+        "object": "objeto ou complemento"
+      },
+      "suggested_source_types": ["DADOS_PUBLICOS", "AGENCIA_CHECAGEM"],
+      "is_check_worthy": true
+    }
+  ]
+}
 - RESPOSTA DIRETA EM JSON: Não adicione blocos de reflexão ou monólogo interno. Responda única e exclusivamente o objeto JSON solicitado."""
 
 DECOMPOSITION_JSON_SCHEMA = {
@@ -458,6 +477,25 @@ class LLMClaimDecomposer:
             parsed = json.loads(content)
             primary_claim = parsed.get("primary_claim")
             raw_assertions = parsed.get("assertions", [])
+
+            # Auto-healing: se o modelo responder em formato plano (sem o array 'assertions')
+            if not raw_assertions and (parsed.get("statement") or primary_claim):
+                flat_stmt = parsed.get("statement") or primary_claim or cleaned_text
+                flat_sub = parsed.get("triple.subject") or parsed.get("subject") or ""
+                flat_pred = parsed.get("triple.predicate") or parsed.get("predicate") or ""
+                flat_obj = parsed.get("triple.object") or parsed.get("object") or ""
+                raw_assertions = [{
+                    "id": 1,
+                    "statement": str(flat_stmt),
+                    "category": "FACTUAL_CLAIM",
+                    "triple": {
+                        "subject": str(flat_sub or ""),
+                        "predicate": str(flat_pred or ""),
+                        "object": str(flat_obj or ""),
+                    },
+                    "suggested_source_types": ["DADOS_PUBLICOS", "AGENCIA_CHECAGEM"],
+                    "is_check_worthy": True,
+                }]
 
             # Salvaguarda lexical para frases concisas (evita que o modelo invente radicais como "emagessa")
             if primary_claim and len(cleaned_text.split()) <= 8:
