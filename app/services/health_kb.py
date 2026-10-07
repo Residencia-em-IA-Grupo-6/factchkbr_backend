@@ -306,7 +306,14 @@ class HealthLocalKB:
             "meses", "taxa", "índice", "população", "serviço", "serviços", "público", "públicos",
             "água", "agua", "limão", "limao", "café", "cafe", "chá", "cha", "suco", "sucos",
             "leite", "comida", "alimento", "alimentos", "dieta", "dietas", "fruta", "frutas",
-            "legume", "legumes", "açúcar", "acucar", "sal", "gordura", "corpo", "peso"
+            "legume", "legumes", "açúcar", "acucar", "sal", "gordura", "corpo", "peso",
+            "emagrece", "emagrecem", "emagrecer", "emagrecimento",
+            "engorda", "engordam", "engordar", "engordamento",
+            "natural", "naturais", "forma", "formas", "efeito", "efeitos",
+            "faz", "fazem", "fazer", "mal", "bem",
+            "mata", "matam", "matar", "morte", "mortes",
+            "pessoa", "pessoas", "humano", "humanos",
+            "bom", "boa", "bons", "boas", "ruim", "ruins",
         }
 
         for token in tokens:

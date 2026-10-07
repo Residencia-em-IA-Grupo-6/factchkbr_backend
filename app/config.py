@@ -62,10 +62,10 @@ class Settings(BaseSettings):
     VECTOR_AUTO_INDEX: bool = True
 
     def get_llm_endpoint(self) -> str:
-        """Retorna a URL de chat completions compatível com OpenAI."""
+        """Retorna a URL de chat completions compatível com OpenAI ou o endpoint nativo do Ollama."""
         if self.LLM_PROVIDER.lower() == "ollama":
             base = self.OLLAMA_BASE_URL.rstrip("/")
-            return f"{base}/v1/chat/completions"
+            return f"{base}/api/chat"
         return f"{self.OPENAI_BASE_URL.rstrip('/')}/chat/completions"
 
     def get_llm_model(self) -> str:

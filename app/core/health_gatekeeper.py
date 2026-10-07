@@ -167,7 +167,8 @@ class HealthGatekeeperDecision(BaseModel):
 # 2. PROMPT DO CLASSIFICADOR SEMÂNTICO (LLM)
 # ==============================================================================
 
-GATEKEEPER_SYSTEM_PROMPT = """Você é o Gatekeeper Temático e Filtro de Escopo do FactChkBR.
+GATEKEEPER_SYSTEM_PROMPT = """/no_think
+Você é o Gatekeeper Temático e Filtro de Escopo do FactChkBR.
 Sua única responsabilidade é determinar se o texto recebido trata de um tema substantivo de SAÚDE (biomedicina, doenças, tratamentos, vacinas, medicamentos, órgãos sanitários) ou se deve ser RECUSADO por se tratar de polêmica política, retórica partidária ou outro assunto fora de escopo.
 
 DIRETRIZES DE DECISÃO:
@@ -423,20 +424,53 @@ class HealthTopicGatekeeper:
             model = self.settings.get_llm_model()
             headers = self.settings.get_llm_headers()
 
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Texto: \"{text.strip()}\""},
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.0,
-            }
+            is_ollama = self.settings.LLM_PROVIDER.lower() == "ollama"
+            if is_ollama:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Texto: \"{text.strip()}\""},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "format": "json",
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 300,
+                    },
+                }
+            else:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": GATEKEEPER_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Texto: \"{text.strip()}\""},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.0,
+                }
 
             resp = await self.http_client.post(endpoint, headers=headers, json=payload, timeout=12.0)
             if resp.status_code == 200:
                 data = resp.json()
-                content = data["choices"][0]["message"]["content"]
+                if "message" in data:
+                    content = data["message"].get("content", "")
+                elif "choices" in data and data["choices"]:
+                    content = data["choices"][0].get("message", {}).get("content", "")
+                else:
+                    content = ""
+
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                if "```" in content:
+                    fence_m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+                    if fence_m:
+                        content = fence_m.group(1).strip()
+                start = content.find("{")
+                end = content.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    content = content[start : end + 1]
+
                 parsed = json.loads(content)
 
                 allows = bool(parsed.get("allows_verification", False))

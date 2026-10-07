@@ -261,15 +261,69 @@ def extract_substantive_tokens(text: str) -> list[str]:
     return [t for t in raw_tokens if t not in STOP_WORDS_PT]
 
 
-def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
+def build_search_queries(claim: str, original_text: str | None = None) -> list[str]:
+    """
+    Gera consultas multi-termo inteligentes para maximizar a revocação nas APIs de checagem:
+    1. Frase integral limpa
+    2. Frase original do usuário (se fornecida e diferente)
+    3. Palavras-chave substantivas essenciais (sem stop words)
+    4. Bigramas/combinações principais de substantivos
+    """
+    queries: list[str] = []
+    clean_c = clean_reviewed_claim(claim)
+    base_q = clean_c if clean_c else claim.strip()
+    if base_q:
+        queries.append(base_q)
+
+    if original_text and original_text.strip():
+        clean_orig = clean_reviewed_claim(original_text).strip()
+        if clean_orig and clean_orig.lower() != base_q.lower() and clean_orig not in queries:
+            queries.append(clean_orig)
+
+    tokens = extract_substantive_tokens(base_q)
+    if tokens:
+        keyword_query = " ".join(tokens)
+        if keyword_query not in queries:
+            queries.append(keyword_query)
+
+        # Se houver 2 ou mais termos substantivos, gera pares-chave (ex: "água limão", "limão emagrece")
+        if len(tokens) >= 2:
+            pair1 = f"{tokens[0]} {tokens[1]}"
+            if pair1 not in queries:
+                queries.append(pair1)
+        if len(tokens) >= 3:
+            pair2 = f"{tokens[1]} {tokens[2]}"
+            if pair2 not in queries:
+                queries.append(pair2)
+
+    if original_text and original_text.strip():
+        orig_tokens = extract_substantive_tokens(original_text)
+        if orig_tokens and len(orig_tokens) >= 2:
+            orig_kw = " ".join(orig_tokens)
+            if orig_kw not in queries:
+                queries.append(orig_kw)
+
+    return list(dict.fromkeys(queries))
+
+
+def check_evidence_relevance(claim: str, evidence_text: str, original_text: str | None = None) -> bool:
     """
     Verifica se a evidência trata especificamente do mesmo assunto da alegação,
     evitando falsos positivos gerados por notícias tangenciais ou coincidentes.
+    Permite validar tanto pelos tokens da claim quanto pelo original_text do usuário.
     """
     clean_c = clean_reviewed_claim(claim)
     claim_tokens = extract_substantive_tokens(clean_c if clean_c else claim)
-    if not claim_tokens:
+    
+    orig_tokens: list[str] = []
+    if original_text:
+        clean_o = clean_reviewed_claim(original_text)
+        orig_tokens = extract_substantive_tokens(clean_o if clean_o else original_text)
+
+    all_target_tokens = list(dict.fromkeys(claim_tokens + orig_tokens))
+    if not all_target_tokens:
         return True
+
     ev_tokens = set(extract_substantive_tokens(evidence_text))
 
     def _token_match(ct: str, et: str) -> bool:
@@ -284,14 +338,14 @@ def check_evidence_relevance(claim: str, evidence_text: str) -> bool:
         return False
 
     matches = 0
-    for ct in claim_tokens:
+    for ct in all_target_tokens:
         if any(_token_match(ct, et) for et in ev_tokens):
             matches += 1
 
-    n_tokens = len(claim_tokens)
+    n_tokens = len(all_target_tokens)
     if n_tokens <= 2:
-        return matches >= n_tokens
-    return (matches / n_tokens) >= 0.50
+        return matches >= 1
+    return (matches / n_tokens) >= 0.40
 
 
 @register_analyzer("fact_check_api", weight=1.5)
@@ -354,88 +408,112 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
                 logger.debug("Não foi possível acessar a URL informada pelo usuário (%s): %s", url, e)
         return evidences
 
-    async def search_google_fact_check(self, query: str) -> list[EvidenceItem]:
+    async def search_google_fact_check(self, query: str, original_text: str | None = None) -> list[EvidenceItem]:
         """
         Consulta a Google Fact Check Tools API para localizar checagens prévias
         realizadas por agências certificadas (Lupa, Aos Fatos, Boatos.org, etc.).
+        Gera consultas multi-termo para superar a sensibilidade da API a stop words e ruído.
         """
         api_key = self.settings.GOOGLE_FACTCHECK_API_KEY
         if not api_key:
             logger.debug("GOOGLE_FACTCHECK_API_KEY não configurada. Prosseguindo para leitura horizontal.")
             return []
 
-        encoded_query = urllib.parse.quote(query[:180])
-        url = (
-            f"https://factchecktools.googleapis.com/v1alpha1/claims:search"
-            f"?query={encoded_query}&languageCode=pt-BR&key={api_key}"
-        )
+        search_terms = build_search_queries(query, original_text=original_text)
+        evidences: list[EvidenceItem] = []
+        seen_urls: set[str] = set()
 
-        try:
-            resp = await self.http_client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                claims_data = data.get("claims", [])
-                evidences: list[EvidenceItem] = []
+        async def _query_api(q: str, lang: str | None = "pt-BR") -> list[dict[str, Any]]:
+            encoded_query = urllib.parse.quote(q[:160])
+            lang_param = f"&languageCode={lang}" if lang else ""
+            url = f"https://factchecktools.googleapis.com/v1alpha1/claims:search?query={encoded_query}{lang_param}&key={api_key}"
+            try:
+                resp = await self.http_client.get(url, timeout=6.0)
+                if resp.status_code == 200:
+                    return resp.json().get("claims", [])
+                else:
+                    logger.debug("Google Fact Check API status %s para '%s'", resp.status_code, q)
+            except Exception as e:
+                logger.debug("Erro na chamada à Google Fact Check API (%s): %s", q, e)
+            return []
 
-                for c in claims_data:
-                    claim_text = c.get("text", "")
-                    reviews = c.get("claimReview", [])
-                    for rev in reviews:
-                        publisher = rev.get("publisher", {}).get("name", "Checador Independente")
-                        title = rev.get("title") or claim_text
-                        rating = rev.get("textualRating", "")
-                        review_url = rev.get("url", "")
-                        review_date = rev.get("reviewDate")
+        tasks = [_query_api(term, lang="pt-BR") for term in search_terms[:3]]
+        if len(search_terms) >= 2:
+            tasks.append(_query_api(search_terms[1], lang=None))
 
-                        evidences.append(
-                            EvidenceItem(
-                                title=title,
-                                source_name=f"{publisher} (Fact-Check)",
-                                url=review_url,
-                                snippet=f"Alegação revisada: \"{claim_text}\" | Classificação: {rating}",
-                                rating=rating,
-                                is_fact_check=True,
-                                published_date=review_date,
-                                claim_reviewed=claim_text,
-                                source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
-                            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r_list in results:
+            if not isinstance(r_list, list):
+                continue
+            for c in r_list:
+                claim_text = c.get("text", "")
+                reviews = c.get("claimReview", [])
+                for rev in reviews:
+                    review_url = rev.get("url", "")
+                    if review_url and review_url in seen_urls:
+                        continue
+                    if review_url:
+                        seen_urls.add(review_url)
+
+                    publisher = rev.get("publisher", {}).get("name", "Checador Independente")
+                    title = rev.get("title") or claim_text
+                    rating = rev.get("textualRating", "")
+                    review_date = rev.get("reviewDate")
+
+                    evidences.append(
+                        EvidenceItem(
+                            title=title,
+                            source_name=f"{publisher} (Fact-Check)",
+                            url=review_url,
+                            snippet=f"Alegação revisada: \"{claim_text}\" | Classificação: {rating}",
+                            rating=rating,
+                            is_fact_check=True,
+                            published_date=review_date,
+                            claim_reviewed=claim_text,
+                            source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
                         )
-                return evidences
-            else:
-                logger.debug("Google Fact Check API retornou status %s: %s", resp.status_code, resp.text[:200])
-        except Exception as e:
-            logger.warning("Falha na chamada à Google Fact Check API: %s", e)
+                    )
 
-        return []
+        return evidences
 
-    async def search_lateral_reading(self, query: str) -> list[EvidenceItem]:
+    async def search_lateral_reading(self, query: str, original_text: str | None = None) -> list[EvidenceItem]:
         """
         Executa Leitura Horizontal em fontes confiáveis (G1, Folha, Estadão, BBC, WHO, Fiocruz, Anvisa, IBGE, Ipea)
         utilizando busca agregada para obter matérias de apuração e dados oficiais em tempo real.
         """
-        clean_q = re.sub(r"[\"']", "", query)
-        encoded_query = urllib.parse.quote(clean_q[:160])
-        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+        search_terms = build_search_queries(query, original_text=original_text)
+        tasks = []
+        for term in search_terms[:2]:
+            clean_q = re.sub(r"[\"']", "", term)
+            encoded_query = urllib.parse.quote(clean_q[:160])
+            rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+            tasks.append(self._fetch_rss(rss_url, max_items=8))
 
-        tasks = [self._fetch_rss(rss_url, max_items=8)]
-
+        # Busca estatística se houver termos econômicos/demográficos
+        primary_term = search_terms[0] if search_terms else query
         is_stat = bool(
             re.search(
                 r"\b(?:pib|inflação|ipca|desemprego|saúde|educação|gastos?|orçamento|taxa|censo|população|salário)\b",
-                clean_q,
+                primary_term,
                 re.IGNORECASE,
             )
         )
         if is_stat:
-            stat_query = f"(site:ibge.gov.br OR site:ipea.gov.br) {clean_q[:80]}"
+            stat_query = f"(site:ibge.gov.br OR site:ipea.gov.br) {primary_term[:80]}"
             stat_url = f"https://news.google.com/rss/search?q={urllib.parse.quote(stat_query)}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
             tasks.append(self._fetch_rss(stat_url, max_items=4, force_official=True))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         evidences: list[EvidenceItem] = []
+        seen_links: set[str] = set()
         for res in results:
             if isinstance(res, list):
-                evidences.extend(res)
+                for ev in res:
+                    if ev.url and ev.url in seen_links:
+                        continue
+                    if ev.url:
+                        seen_links.add(ev.url)
+                    evidences.append(ev)
 
         return evidences
 
@@ -743,6 +821,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         self,
         evidences: list[EvidenceItem],
         claim: str = "",
+        original_text: str | None = None,
     ) -> tuple[Verdict, float, list[str]]:
         """
         Calcula o veredito e nível de confiança a partir das evidências consolidadas,
@@ -771,7 +850,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             if ev.source_name.startswith("Anvisa") or ev.source_name.startswith("ClinicalTrials") or "PubMed" in ev.source_name or "Europe PMC" in ev.source_name:
                 is_relevant = True
             else:
-                is_relevant = check_evidence_relevance(claim, ev_text)
+                is_relevant = check_evidence_relevance(claim, ev_text, original_text=original_text)
             ev.is_relevant = is_relevant
             if not is_relevant:
                 ev.stance = "NEUTRAL"
@@ -938,7 +1017,12 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             ],
         )
 
-    async def check_single_claim(self, claim_text: str, extra_evidences: list[EvidenceItem] | None = None) -> dict[str, Any]:
+    async def check_single_claim(
+        self,
+        claim_text: str,
+        extra_evidences: list[EvidenceItem] | None = None,
+        original_text: str | None = None,
+    ) -> dict[str, Any]:
         """
         Executa a checagem isolada para uma única proposição factual:
         - Camada 1: Base Local da ANVISA (SQLite) para validação regulatória instantânea
@@ -1021,8 +1105,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         local_evidences = self.inspect_local_health_kb(clean_text)
 
         # Camada 2: Varredura concorrente em fontes externas (checagens, imprensa de referência e repositórios biomédicos)
-        fc_task = self.search_google_fact_check(clean_text)
-        lat_task = self.search_lateral_reading(clean_text)
+        fc_task = self.search_google_fact_check(clean_text, original_text=original_text)
+        lat_task = self.search_lateral_reading(clean_text, original_text=original_text)
         ct_task = self.search_clinical_trials(clean_text)
         bio_task = self.search_biomedical_literature(clean_text)
 
@@ -1042,7 +1126,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             + bio_evidences
         )
 
-        verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text)
+        verdict, confidence, reasons = self.evaluate_verdict(all_evidences, claim=clean_text, original_text=original_text)
 
         # Camada de Decisão Neural Plumb-4B (Cenário 2: verificação matemática por alegação)
         plumb_used = False
@@ -1170,7 +1254,13 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         summary_reason = "Nenhuma das alegações possui referências conclusivas suficientes para confirmação ou desmentido."
         return verdict, confidence, [summary_reason] + itemized_reasons
 
-    async def analyze(self, text: str, urls: list[str], assertions: list[str] | None = None) -> AnalyzerResult:
+    async def analyze(
+        self,
+        text: str,
+        urls: list[str],
+        assertions: list[str] | None = None,
+        original_text: str | None = None,
+    ) -> AnalyzerResult:
         """
         Executa a checagem das alegações isoladamente.
         Se 'assertions' for fornecido com múltiplas alegações, checa cada uma em paralelo.
@@ -1181,12 +1271,18 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             targets = [text.strip()] if text.strip() else []
 
         targets = targets[:4]
+        orig = original_text or text
 
         # Extrai conteúdo de URLs informadas pelo usuário
         user_evidences = await self.fetch_user_urls(urls) if urls else []
 
         # Executa a checagem de cada alegação em paralelo
-        sub_results = await asyncio.gather(*[self.check_single_claim(t, extra_evidences=user_evidences) for t in targets])
+        sub_results = await asyncio.gather(
+            *[
+                self.check_single_claim(t, extra_evidences=user_evidences, original_text=orig)
+                for t in targets
+            ]
+        )
 
         all_evidences = []
         all_sources = []

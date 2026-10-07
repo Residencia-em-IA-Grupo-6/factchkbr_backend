@@ -226,7 +226,12 @@ class FactCheckOrchestrator:
         fc_sub_claims: list[dict[str, Any]] = []
         if "fact_check_api" in active_map:
             t0 = time.perf_counter()
-            fc_res = await active_map["fact_check_api"].analyze(target_claim, urls, assertions=check_worthy_stmts)
+            fc_res = await active_map["fact_check_api"].analyze(
+                target_claim,
+                urls,
+                assertions=check_worthy_stmts,
+                original_text=text,
+            )
             dur = time.perf_counter() - t0
             results.append(fc_res)
             evidences = (fc_res.raw_details or {}).get("evidences", [])

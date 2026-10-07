@@ -46,6 +46,7 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
             return self._fallback_result(text)
 
         system_prompt = (
+            "/no_think\n"
             "Você é o redator sênior e analista editorial do FactChkBR, perito em verificação de fatos e desinformação no Brasil.\n"
             "O motor neural de decisão epistêmica (Plumb-4B) é o responsável por determinar matematicamente a veracidade de cada alegação individual.\n"
             "SUA MISSÃO EXCLUSIVA É JORNALÍSTICA E EDITORIAL: Redigir uma síntese explicativa e pedagógica ('summary'), enumerar as razões fáticas ('reasons') e elaborar justificativas claras para cada alegação em 'claims_evaluation' com base nas evidências.\n\n"
@@ -180,23 +181,58 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
 
         try:
             timeout = 65.0 if provider.lower() == "ollama" else 15.0
+            is_ollama = provider.lower() == "ollama"
+            if is_ollama:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "format": "json",
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 800,
+                    },
+                }
+            else:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.1,
+                }
+
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     endpoint,
                     headers=headers,
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0.1,
-                    },
+                    json=payload,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
+                    if "message" in data:
+                        content = data["message"].get("content", "")
+                    elif "choices" in data and data["choices"]:
+                        content = data["choices"][0].get("message", {}).get("content", "")
+                    else:
+                        content = ""
+
+                    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                    if "```" in content:
+                        fence_m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+                        if fence_m:
+                            content = fence_m.group(1).strip()
+                    start = content.find("{")
+                    end = content.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        content = content[start : end + 1]
+
                     parsed = json.loads(content)
 
                     # Mapeia veredito com validação

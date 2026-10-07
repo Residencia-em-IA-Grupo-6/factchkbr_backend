@@ -266,33 +266,15 @@ SpacyNERCleaner = SpacyPreprocessor
 # ==============================================================================
 
 SYSTEM_PROMPT = """Você é um especialista em Fact-Checking e Extração Semântica de Alegações (Claim Extraction & Check-Worthiness).
+/no_think
 Sua responsabilidade é analisar o texto recebido de redes sociais ou fontes públicas e estruturar suas proposições atômicas, identificando com precisão a alegação central a ser checada.
 
 ### REQUISITOS FUNDAMENTAIS:
 - IDIOMA ESTRITAMENTE EM PORTUGUÊS (pt-BR): Todos os campos ('primary_claim', 'statement', 'triple.subject', 'triple.predicate', 'triple.object') DEVEM ser mantidos rigorosamente em PORTUGUÊS (pt-BR). É expressamente PROIBIDO traduzir termos para o inglês ou qualquer outro idioma.
+- FIDELIDADE LEXICAL: NÃO invente palavras, neologismos ou sufixos inexistentes (ex: NUNCA altere "emagrece" para "emagessa" ou "limonete"). Preserve exatamente o vocabulário e a grafia das palavras do texto original em português.
 - PRESERVAÇÃO DENOTATIVA: Mantenha a alegação central expressa em português de forma clara, denotativa e fiel ao sentido pretendido. Se o texto for "É falso que voto não pode ser usado no INSS", a primary_claim deve ser em português (ex: "É falso que voto não pode ser usado no INSS" ou "O voto não pode ser utilizado como prova de vida do INSS"), NUNCA gere frases em inglês como "voting can be used in INSS".
 - COMPLETUDE DAS ASSERÇÕES: Cada asserção ('statement') DEVE ser uma oração completa e inteligível (ex: 'É falso que o voto não pode ser usado no INSS'). NUNCA retorne fragmentos incompletos como apenas 'É falso' ou 'Não procede'.
-
-### DIRETRIZES SEMÂNTICAS:
-1. IDENTIFICAÇÃO DA ALEGAÇÃO CENTRAL (primary_claim):
-   - Textos frequentemente combinam desabafos, retórica interpessoal, saudações, menções a suporte ("tá na bula", "ouvi no rádio") e proposições empíricas sobre o mundo real.
-   - Identifique a alegação central ('primary_claim') como a proposição de fato substantivo sobre o mundo real (saúde, ciência, economia, atos de governo, estatísticas, eventos) com maior relevância pública e potencial de checagem empírica.
-   - Se o texto for puramente conversacional, retórico ou opinativo sem qualquer fato falseável sobre o mundo real, defina 'primary_claim' como null.
-
-2. TAXONOMIA DAS ASSERÇÕES (category):
-   - FACTUAL_CLAIM: Fato empírico verificável sobre o mundo real.
-   - ATTRIBUTION: Citação, fala atribuída a terceiros ou referência a suporte de mídia/documento.
-   - CONVERSATIONAL_NOISE: Desabafo, retórica, bordão ou fórmula conversacional sem valor factual falseável.
-   - OPINION: Juízo de valor subjetivo, crença pessoal ou saudação não falseável.
-
-3. RELEVÂNCIA PARA CHECAGEM (is_check_worthy):
-   - Proposições FACTUAL_CLAIM devem ter 'is_check_worthy: true'.
-   - CONVERSATIONAL_NOISE e OPINION devem ter 'is_check_worthy: false'.
-
-4. NORMALIZAÇÃO DENOTATIVA:
-   - Elimine sensacionalismo, pontuações de pânico e pronomes de desabafo pessoal.
-   - Preserve rigorosamente entidades, datas, locais e dados quantitativos expressos no texto original.
-   - Responda estritamente no schema JSON fornecido e OBRIGATORIAMENTE em português (pt-BR)."""
+- RESPOSTA DIRETA EM JSON: Não adicione blocos de reflexão ou monólogo interno. Responda única e exclusivamente o objeto JSON solicitado."""
 
 DECOMPOSITION_JSON_SCHEMA = {
     "type": "object",
@@ -402,22 +384,39 @@ class LLMClaimDecomposer:
             "Responda OBRIGATORIAMENTE em português (pt-BR)."
         )
 
-        payload = {
-            "model": self.settings.get_llm_model(),
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "claim_decomposition",
-                    "strict": True,
-                    "schema": DECOMPOSITION_JSON_SCHEMA,
+        is_ollama = self.settings.LLM_PROVIDER.lower() == "ollama"
+        if is_ollama:
+            payload = {
+                "model": self.settings.get_llm_model(),
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": False,
+                "think": False,
+                "format": "json",
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 512,
                 },
-            },
-            "temperature": 0.0,
-        }
+            }
+        else:
+            payload = {
+                "model": self.settings.get_llm_model(),
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "claim_decomposition",
+                        "strict": True,
+                        "schema": DECOMPOSITION_JSON_SCHEMA,
+                    },
+                },
+                "temperature": 0.0,
+            }
 
         try:
             resp = await self.http_client.post(
@@ -426,8 +425,8 @@ class LLMClaimDecomposer:
                 json=payload,
             )
 
-            # Se json_schema não for aceito pelo provedor/modelo, tenta modo json_object
-            if resp.status_code == 400:
+            # Se json_schema não for aceito pelo provedor/modelo (OpenAI compat), tenta modo json_object
+            if not is_ollama and resp.status_code == 400:
                 payload["response_format"] = {"type": "json_object"}
                 resp = await self.http_client.post(
                     self.settings.get_llm_endpoint(),
@@ -438,10 +437,42 @@ class LLMClaimDecomposer:
             resp.raise_for_status()
 
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+            if "message" in data:
+                content = data["message"].get("content", "")
+            elif "choices" in data and data["choices"]:
+                content = data["choices"][0].get("message", {}).get("content", "")
+            else:
+                content = ""
+
+            # Sanitização: remove blocos residuais de pensamento <think> e fences markdown ```json ... ```
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            if "```" in content:
+                fence_m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+                if fence_m:
+                    content = fence_m.group(1).strip()
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                content = content[start : end + 1]
+
             parsed = json.loads(content)
             primary_claim = parsed.get("primary_claim")
             raw_assertions = parsed.get("assertions", [])
+
+            # Salvaguarda lexical para frases concisas (evita que o modelo invente radicais como "emagessa")
+            if primary_claim and len(cleaned_text.split()) <= 8:
+                orig_words = set(re.findall(r"\b[A-Za-zÀ-ÿ]{3,}\b", cleaned_text.lower()))
+                claim_words = set(re.findall(r"\b[A-Za-zÀ-ÿ]{3,}\b", primary_claim.lower()))
+                diff = claim_words - orig_words
+                for w in diff:
+                    if w in ("emagessa", "limonete") or (len(diff) > 2 and len(orig_words) <= 3):
+                        logger.warning(
+                            "Distorção léxica detectada no primary_claim ('%s' vs '%s'). Restaurando texto original.",
+                            primary_claim,
+                            cleaned_text,
+                        )
+                        primary_claim = cleaned_text
+                        break
 
             # Salvaguarda contra contaminação linguística (ex: modelo menor traduzindo para inglês)
             cleaned_has_en = bool(ENGLISH_WORDS_PATTERN.search(cleaned_text))
@@ -454,7 +485,19 @@ class LLMClaimDecomposer:
                     primary_claim = cleaned_text
 
             assertions: list[AtomicAssertion] = []
-            for item in raw_assertions:
+            for idx, item in enumerate(raw_assertions, 1):
+                if isinstance(item, str):
+                    item = {
+                        "id": idx,
+                        "statement": item,
+                        "category": "FACTUAL_CLAIM",
+                        "triple": {"subject": "", "predicate": "", "object": ""},
+                        "suggested_source_types": ["DADOS_PUBLICOS", "AGENCIA_CHECAGEM"],
+                        "is_check_worthy": True,
+                    }
+                elif not isinstance(item, dict):
+                    continue
+
                 # Normaliza categoria taxonômica
                 item["category"] = map_claim_category(item.get("category"))
 
