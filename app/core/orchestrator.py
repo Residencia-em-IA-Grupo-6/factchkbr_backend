@@ -38,6 +38,15 @@ class FactCheckOrchestrator:
         self.settings = settings or get_settings()
         self._cached_analyzers: dict[str, BaseAnalyzer] = {}
         self.health_gatekeeper = HealthTopicGatekeeper(settings=self.settings)
+        self._vector_kb = None
+
+    @property
+    def vector_kb(self):
+        """Acesso lazy ao serviço de banco vetorial persistente."""
+        if self._vector_kb is None:
+            from app.services.vector_kb import get_vector_kb
+            self._vector_kb = get_vector_kb(settings=self.settings)
+        return self._vector_kb
 
     def get_active_analyzers(self) -> list[BaseAnalyzer]:
         """
@@ -249,8 +258,18 @@ class FactCheckOrchestrator:
                 cb = on_step("llm_judge", j_res, dur)
                 if asyncio.iscoroutine(cb):
                     await cb
+        consolidated = self._consolidate(text, results, target_claim=target_claim)
 
-        return self._consolidate(text, results, target_claim=target_claim)
+        # Indexação contínua automática no banco vetorial persistente (ChromaDB)
+        if self.settings.VECTOR_AUTO_INDEX and consolidated.verdict != Verdict.INCONCLUSIVO:
+            try:
+                category = "PUBLIC_HEALTH" if self.settings.HEALTH_ONLY_MODE else None
+                self.vector_kb.add_from_analysis(consolidated, category=category)
+                logger.info("Checagem consolidada indexada com sucesso no ChromaDB.")
+            except Exception as e:
+                logger.warning("Falha ao auto-indexar checagem no ChromaDB: %s", e)
+
+        return consolidated
 
     def _consolidate(
         self,

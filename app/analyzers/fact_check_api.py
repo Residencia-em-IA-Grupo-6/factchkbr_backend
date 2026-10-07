@@ -498,6 +498,58 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         return evidences
 
+    def inspect_vector_kb(self, query: str) -> list[EvidenceItem]:
+        """
+        Camada 0: Consulta à Base Vetorial Persistente (ChromaDB).
+        Recupera alegações fáticas semanticamente próximas já verificadas e indexadas,
+        aproveitando o histórico de checagens e fontes já apuradas.
+        """
+        evidences: list[EvidenceItem] = []
+        try:
+            from app.services.vector_kb import get_vector_kb
+            kb = get_vector_kb()
+            settings = get_settings()
+            if not settings.VECTOR_SEARCH_ENABLED or kb.count() == 0:
+                return []
+
+            matches = kb.search_claims(
+                query=query,
+                limit=3,
+                min_similarity=settings.VECTOR_SIMILARITY_THRESHOLD,
+            )
+            for m in matches:
+                stance = "SUPPORTS" if m.verdict == Verdict.VERDADEIRO else ("REFUTES" if m.verdict == Verdict.FAKE else "NEUTRAL")
+                sim_pct = int((m.similarity or 0.0) * 100)
+
+                snippet = (
+                    f"Checagem anterior na base vetorial (Similaridade: {sim_pct}%, Confiança: {int(m.confidence * 100)}%): "
+                    f"Veredito {m.verdict.value}. Justificativa: {m.summary}"
+                )
+                if m.reasons:
+                    snippet += f" Motivos: {' | '.join(m.reasons[:2])}"
+
+                first_source = m.sources[0] if m.sources else f"vector://claims/{m.id}"
+
+                evidences.append(
+                    EvidenceItem(
+                        title=f"Base Vetorial [{m.verdict.value}]: {m.statement}",
+                        source_name="Base Vetorial FactChkBR (ChromaDB)",
+                        url=first_source,
+                        snippet=snippet[:320],
+                        rating=m.verdict.value,
+                        is_fact_check=True,
+                        published_date=m.created_at,
+                        claim_reviewed=m.statement,
+                        source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+                        stance=stance,
+                        is_relevant=True,
+                    )
+                )
+        except Exception as e:
+            logger.debug("Falha ao consultar base vetorial (%s): %s", query[:60], e)
+
+        return evidences
+
     def inspect_local_health_kb(self, query: str) -> list[EvidenceItem]:
         """
         Camada 1: Consulta a Base Local de Saúde (Anvisa) em SQLite.
@@ -870,6 +922,9 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         """
         clean_text = claim_text.strip()
 
+        # Camada 0: Consulta prévia à base vetorial persistente (ChromaDB)
+        vector_evidences = self.inspect_vector_kb(clean_text)
+
         # Camada 1: Consulta local e instantânea à base oficial ANVISA (se disponível)
         local_evidences = self.inspect_local_health_kb(clean_text)
 
@@ -887,6 +942,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         all_evidences = (
             (extra_evidences or [])
+            + vector_evidences
             + local_evidences
             + google_evidences
             + lateral_evidences
@@ -941,6 +997,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             "decision_engine": "plumb-4b" if plumb_used else "rules",
             "probabilities": plumb_probs,
             "evidences": [e.model_dump() for e in all_evidences[:6]],
+            "vector_kb_count": len(vector_evidences),
             "anvisa_local_count": len(local_evidences),
             "google_fact_check_count": len(google_evidences),
             "lateral_reading_count": len(lateral_evidences),
@@ -1041,6 +1098,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         all_evidences = []
         all_sources = []
+        total_vector_count = 0
         total_fc_count = 0
         total_lat_count = 0
         total_anvisa_count = 0
@@ -1049,6 +1107,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         for sr in sub_results:
             all_evidences.extend(sr.get("evidences", []))
             all_sources.extend(sr.get("sources", []))
+            total_vector_count += sr.get("vector_kb_count", 0)
             total_fc_count += sr.get("google_fact_check_count", 0)
             total_lat_count += sr.get("lateral_reading_count", 0)
             total_anvisa_count += sr.get("anvisa_local_count", 0)
@@ -1079,6 +1138,7 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             sources=list(dict.fromkeys(all_sources))[:6] or ["Mídia de Referência e Órgãos Oficiais"],
             raw_details={
                 "total_evidences": len(all_evidences),
+                "vector_kb_count": total_vector_count,
                 "anvisa_local_count": total_anvisa_count,
                 "google_fact_check_count": total_fc_count,
                 "lateral_reading_count": total_lat_count,

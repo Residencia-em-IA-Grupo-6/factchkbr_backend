@@ -42,8 +42,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Rota exigida pelo Bot do Telegram: /api/analyze e /api/health
+    # Rota exigida pelo Bot do Telegram e clientes API: /api e /api/v1
     app.include_router(api_router, prefix="/api")
+    app.include_router(api_router, prefix="/api/v1")
 
     # Rota raiz de healthcheck
     @app.get("/health", tags=["Infraestrutura"])

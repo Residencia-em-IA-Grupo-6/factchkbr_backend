@@ -20,3 +20,6 @@ htmlcov/
 *.sqlite3
 *.sqlite
 app/data/*.csv
+app/data/chroma_db/*
+!app/data/chroma_db/.gitkeep
+*.ses

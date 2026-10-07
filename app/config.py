@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     TELEGRAM_API_BASE_URL: str = "https://api.telegram.org"
     TELEGRAM_AUTO_REPLY: bool = True
 
+    # Banco de Dados Vetorial Persistente (ChromaDB)
+    CHROMA_PERSIST_DIR: str = "app/data/chroma_db"
+    CHROMA_COLLECTION_NAME: str = "fact_claims"
+    VECTOR_SEARCH_ENABLED: bool = True
+    VECTOR_SIMILARITY_THRESHOLD: float = 0.70
+    VECTOR_AUTO_INDEX: bool = True
+
     def get_llm_endpoint(self) -> str:
         """Retorna a URL de chat completions compatível com OpenAI."""
         if self.LLM_PROVIDER.lower() == "ollama":
