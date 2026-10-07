@@ -299,3 +299,117 @@ async def test_fact_check_api_bypasses_external_searches_on_vector_cache_hit(mon
         assert "⚡ Alegação já analisada previamente" in result.summary
         await analyzer.aclose()
 
+
+def test_canonical_deduplication_punctuation_and_whitespace(temp_vector_kb):
+    """Testa se variações de pontuação e aspas geram o mesmo ID canônico e não duplicam."""
+    # 1. Primeira inserção com ponto final e aspas
+    id1 = temp_vector_kb.add_claim(
+        statement='"A Anvisa proibiu a venda de lote de azeite adulterado no país."',
+        verdict=Verdict.FAKE,
+        confidence=0.75,
+        summary="Resumo inicial.",
+        sources=["https://anvisa.gov.br/fonte1"],
+        reasons=["Motivo 1"],
+    )
+
+    # 2. Segunda inserção sem ponto e sem aspas
+    id2 = temp_vector_kb.add_claim(
+        statement="A Anvisa proibiu a venda de lote de azeite adulterado no país",
+        verdict=Verdict.FAKE,
+        confidence=0.85,
+        summary="Resumo mais completo sobre azeite adulterado.",
+        sources=["https://anvisa.gov.br/fonte2"],
+        reasons=["Motivo 2"],
+    )
+
+    # 3. Terceira inserção com múltiplos espaços e pontuação mista
+    id3 = temp_vector_kb.add_claim(
+        statement="  A Anvisa proibiu a venda de lote de azeite adulterado no país...  ",
+        verdict=Verdict.FAKE,
+        confidence=0.90,
+        sources=["https://anvisa.gov.br/fonte1", "https://anvisa.gov.br/fonte3"],
+    )
+
+    assert id1 == id2 == id3
+    assert temp_vector_kb.count() == 1
+
+    item = temp_vector_kb.get_claim(id1)
+    assert item is not None
+    assert item.statement == "A Anvisa proibiu a venda de lote de azeite adulterado no país"
+    # Fontes mescladas sem duplicatas
+    assert len(item.sources) == 3
+    assert "https://anvisa.gov.br/fonte1" in item.sources
+    assert "https://anvisa.gov.br/fonte2" in item.sources
+    assert "https://anvisa.gov.br/fonte3" in item.sources
+    # Motivos mesclados
+    assert len(item.reasons) == 2
+
+
+def test_deduplicate_collection_merges_records(temp_vector_kb):
+    """Testa a rotina deduplicate_collection() ao encontrar registros com IDs distintos para textos equivalentes."""
+    # Insere manualmente na coleção com 2 IDs diferentes simulando o estado legado anterior
+    temp_vector_kb.collection.upsert(
+        ids=["id_legado_com_ponto", "7e59790e122d1085cf6431fe"],
+        documents=[
+            "A Anvisa proibiu a venda de lote de azeite adulterado no país.",
+            "A Anvisa proibiu a venda de lote de azeite adulterado no país",
+        ],
+        metadatas=[
+            {
+                "verdict": "FAKE",
+                "confidence": 0.70,
+                "summary": "Resumo legado com ponto.",
+                "sources_json": '["https://fonte-legada.com/1"]',
+                "reasons_json": '["Razao 1"]',
+                "created_at": "2026-10-01T00:00:00Z",
+                "claim_type": "primary",
+                "category": "PUBLIC_HEALTH",
+            },
+            {
+                "verdict": "FAKE",
+                "confidence": 0.90,
+                "summary": "Resumo completo da alegação sem ponto.",
+                "sources_json": '["https://fonte-nova.com/2"]',
+                "reasons_json": '["Razao 2"]',
+                "created_at": "2026-10-02T00:00:00Z",
+                "claim_type": "primary",
+                "category": "PUBLIC_HEALTH",
+            },
+        ],
+    )
+    assert temp_vector_kb.count() == 2
+
+    # Executa a deduplicação
+    res = temp_vector_kb.deduplicate_collection()
+    assert res["total_before"] == 2
+    assert res["total_after"] == 1
+    assert res["merged"] == 1
+    assert "id_legado_com_ponto" in res["removed_ids"]
+    assert temp_vector_kb.count() == 1
+
+    canonical_id = temp_vector_kb.generate_claim_id("A Anvisa proibiu a venda de lote de azeite adulterado no país")
+    item = temp_vector_kb.get_claim(canonical_id)
+    assert item is not None
+    assert len(item.sources) == 2
+    assert "https://fonte-legada.com/1" in item.sources
+    assert "https://fonte-nova.com/2" in item.sources
+    assert len(item.reasons) == 2
+    assert item.confidence == 0.90
+
+
+def test_api_deduplicate_endpoint(monkeypatch):
+    """Testa o endpoint POST /api/v1/vector/deduplicate."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_kb = VectorClaimKB(persist_directory=tmp_dir, collection_name="api_dedup_test")
+        import app.services.vector_kb as vk_module
+        monkeypatch.setattr(vk_module, "_vector_kb_instance", test_kb)
+
+        client = TestClient(app)
+        res = client.post("/api/v1/vector/deduplicate")
+        assert res.status_code == 200
+        data = res.json()
+        assert "total_before" in data
+        assert "total_after" in data
+        assert "merged" in data
+
+

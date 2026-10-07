@@ -130,3 +130,15 @@ def delete_claim_by_id(
             detail=f"Alegação com ID '{claim_id}' não encontrada ou não pôde ser removida.",
         )
     return {"status": "deleted", "id": claim_id}
+ 
+ 
+@router.post(
+    "/deduplicate",
+    status_code=status.HTTP_200_OK,
+    summary="Unificar Registros Duplicados",
+    description="Varre o ChromaDB, agrupa alegações equivalentes, mescla fontes e fundamentações e remove registros redundantes.",
+)
+def deduplicate_claims(
+    vector_kb: VectorClaimKB = Depends(get_vector_kb_dep),
+) -> dict[str, Any]:
+    return vector_kb.deduplicate_collection()

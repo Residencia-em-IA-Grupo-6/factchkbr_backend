@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -82,10 +83,25 @@ class VectorClaimKB:
         return self._collection
 
     @staticmethod
-    def generate_claim_id(statement: str) -> str:
-        """Gera hash determinístico SHA256 único para a alegação fática normalizada."""
-        clean_text = statement.strip().lower()
-        return hashlib.sha256(clean_text.encode("utf-8")).hexdigest()[:24]
+    def normalize_statement(statement: str) -> str:
+        """
+        Normaliza o texto da alegação para sua forma canônica:
+        - Remove espaços extras no início, fim e entre palavras.
+        - Remove aspas externas simples ou duplas.
+        - Remove pontuação final redundante (. , ; : ! ? - – —).
+        """
+        text = statement.strip()
+        if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+            text = text[1:-1].strip()
+        text = re.sub(r"[\s\.,;:!?\-–—]+$", "", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        return text
+
+    @classmethod
+    def generate_claim_id(cls, statement: str) -> str:
+        """Gera hash determinístico SHA256 único para a alegação fática canônica."""
+        canonical = cls.normalize_statement(statement).lower()
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
     def add_claim(
         self,
@@ -102,14 +118,19 @@ class VectorClaimKB:
     ) -> str:
         """
         Indexa uma alegação com veredito, fundamentações e fontes no ChromaDB.
-        Se a alegação já existir, atualiza suas informações (upsert determinístico).
+        Garante unicidade estrita:
+        1. Normaliza a alegação para forma canônica (elimina pontuações e espaçamentos espúrios).
+        2. Se já existir registro com hash canônico idêntico, atualiza e mescla fontes/motivos.
+        3. Se já existir registro semanticamente equivalente (similaridade >= DEDUP_THRESHOLD),
+           reutiliza o mesmo identificador para evitar duplicação.
         """
-        stmt_clean = statement.strip()
+        stmt_clean = self.normalize_statement(statement)
         if not stmt_clean:
             raise ValueError("O texto da alegação não pode ser vazio.")
 
-        doc_id = claim_id or self.generate_claim_id(stmt_clean)
-        
+        reasons_list = list(reasons or [])
+        sources_list = list(sources or [])
+
         # Converte veredito para enum canônico
         if isinstance(verdict, str):
             v_upper = verdict.upper()
@@ -117,9 +138,46 @@ class VectorClaimKB:
         else:
             v_val = verdict.value
 
-        reasons_list = reasons or []
-        sources_list = sources or []
-        
+        doc_id = claim_id
+        if not doc_id:
+            canonical_id = self.generate_claim_id(stmt_clean)
+            existing_exact = self.get_claim(canonical_id)
+
+            if existing_exact:
+                doc_id = canonical_id
+                # Mescla fontes e razões existentes com as novas sem duplicar
+                if existing_exact.sources:
+                    sources_list = list(dict.fromkeys(sources_list + existing_exact.sources))
+                if existing_exact.reasons:
+                    reasons_list = list(dict.fromkeys(reasons_list + existing_exact.reasons))
+                if not summary and existing_exact.summary:
+                    summary = existing_exact.summary
+            elif self.count() > 0:
+                # Deduplicação semântica: verifica se já existe alegação com similaridade >= threshold
+                dedup_threshold = getattr(self.settings, "VECTOR_DEDUP_SIMILARITY_THRESHOLD", 0.90)
+                matches = self.search_claims(
+                    query=stmt_clean,
+                    limit=1,
+                    min_similarity=dedup_threshold,
+                )
+                if matches and (matches[0].similarity or 0.0) >= dedup_threshold:
+                    match = matches[0]
+                    doc_id = match.id
+                    logger.info(
+                        "Deduplicação semântica no ChromaDB: alegação '%s' unificada com '%s' (id=%s, sim=%.3f).",
+                        stmt_clean[:50], match.statement[:50], match.id, match.similarity
+                    )
+                    if match.sources:
+                        sources_list = list(dict.fromkeys(sources_list + match.sources))
+                    if match.reasons:
+                        reasons_list = list(dict.fromkeys(reasons_list + match.reasons))
+                    if not summary and match.summary:
+                        summary = match.summary
+                else:
+                    doc_id = canonical_id
+            else:
+                doc_id = canonical_id
+
         # Metadados no ChromaDB exigem tipos primitivos (str, int, float, bool)
         metadata: dict[str, Any] = {
             "verdict": str(v_val),
@@ -351,6 +409,102 @@ class VectorClaimKB:
             return self.collection.count()
         except Exception:
             return 0
+
+    def deduplicate_collection(self) -> dict[str, Any]:
+        """
+        Varre a coleção no ChromaDB, detecta e unifica registros duplicados
+        (por equivalência canônica de texto ou alta proximidade semântica >= DEDUP_THRESHOLD).
+        Mescla fontes e fundamentações e remove registros redundantes.
+        """
+        total_before = self.count()
+        if total_before <= 1:
+            return {"total_before": total_before, "total_after": total_before, "merged": 0, "removed_ids": []}
+
+        data = self.collection.get()
+        ids = data.get("ids", [])
+        documents = data.get("documents", [])
+        metadatas = data.get("metadatas", [])
+
+        # Agrupamento por forma canônica
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for doc_id, doc_text, meta in zip(ids, documents, metadatas):
+            canonical = self.normalize_statement(doc_text).lower()
+            groups.setdefault(canonical, []).append({
+                "id": doc_id,
+                "document": doc_text,
+                "metadata": meta,
+            })
+
+        removed_ids: list[str] = []
+        merged_count = 0
+
+        for canonical_text, group in groups.items():
+            if len(group) > 1:
+                canonical_id = self.generate_claim_id(canonical_text)
+                primary_item = next((item for item in group if item["id"] == canonical_id), group[0])
+
+                all_sources: list[str] = []
+                all_reasons: list[str] = []
+                best_summary = ""
+                best_confidence = 0.5
+                dominant_verdict = primary_item["metadata"].get("verdict", "INCONCLUSIVO")
+
+                for item in group:
+                    meta = item["metadata"]
+                    if "sources_json" in meta:
+                        try:
+                            all_sources.extend(json.loads(meta["sources_json"]))
+                        except Exception:
+                            pass
+                    if "reasons_json" in meta:
+                        try:
+                            all_reasons.extend(json.loads(meta["reasons_json"]))
+                        except Exception:
+                            pass
+                    s = meta.get("summary", "")
+                    if len(s) > len(best_summary):
+                        best_summary = s
+                    c = float(meta.get("confidence", 0.5))
+                    if c > best_confidence:
+                        best_confidence = c
+                    v = meta.get("verdict")
+                    if v and v != "INCONCLUSIVO":
+                        dominant_verdict = v
+
+                merged_sources = list(dict.fromkeys(all_sources))
+                merged_reasons = list(dict.fromkeys(all_reasons))
+
+                # Atualiza/upserta sob o ID canônico
+                self.add_claim(
+                    statement=self.normalize_statement(primary_item["document"]),
+                    verdict=dominant_verdict,
+                    summary=best_summary,
+                    reasons=merged_reasons,
+                    sources=merged_sources,
+                    confidence=best_confidence,
+                    claim_id=canonical_id,
+                    claim_type=primary_item["metadata"].get("claim_type", "primary"),
+                    category=primary_item["metadata"].get("category"),
+                )
+
+                # Remove os outros IDs duplicados
+                for item in group:
+                    if item["id"] != canonical_id:
+                        self.delete_claim(item["id"])
+                        removed_ids.append(item["id"])
+                        merged_count += 1
+
+        total_after = self.count()
+        logger.info(
+            "Deduplicação do ChromaDB concluída: %d antes, %d depois (%d unificados, removidos: %s)",
+            total_before, total_after, merged_count, removed_ids
+        )
+        return {
+            "total_before": total_before,
+            "total_after": total_after,
+            "merged": merged_count,
+            "removed_ids": removed_ids,
+        }
 
     def clear(self) -> None:
         """Remove todas as alegações da coleção atual."""

@@ -168,12 +168,25 @@ def cmd_show(args, kb):
     print("=" * 76)
 
 
+def cmd_dedup(args, kb):
+    print_banner()
+    print("🧹 Iniciando processo de unificação e deduplicação da base vetorial...\n")
+    res = kb.deduplicate_collection()
+    print(f"📊 Registros antes:      {res['total_before']}")
+    print(f"✅ Registros atuais:     {res['total_after']}")
+    print(f"🔄 Unificados/Mesclados: {res['merged']}")
+    if res['removed_ids']:
+        print(f"🗑️  IDs obsoletos removidos: {', '.join(res['removed_ids'])}")
+    print("=" * 76)
+
+
 def interactive_mode(kb):
     print_banner()
     print("Modo Interativo iniciado. Digite comandos ou termos para buscar:")
     print("  • Digite qualquer texto para fazer busca semântica instantânea")
     print("  • 'list'  -> lista os registros gravados")
     print("  • 'stats' -> estatísticas gerais do ChromaDB")
+    print("  • 'dedup' -> unifica registros duplicados")
     print("  • 'show <id>' -> detalha um item por ID")
     print("  • 'exit' ou 'sair' -> encerra")
     print("=" * 76)
@@ -190,6 +203,8 @@ def interactive_mode(kb):
                 cmd_stats(None, kb)
             elif line.lower() == "list":
                 cmd_list(argparse.Namespace(limit=15), kb)
+            elif line.lower() == "dedup":
+                cmd_dedup(None, kb)
             elif line.lower().startswith("show "):
                 cid = line.split(" ", 1)[1].strip()
                 cmd_show(argparse.Namespace(claim_id=cid), kb)
@@ -211,6 +226,9 @@ def main():
     p_list = subparsers.add_parser("list", help="Lista alegações armazenadas")
     p_list.add_argument("--limit", type=int, default=15, help="Quantidade máxima de itens a listar")
 
+    # Subcomando dedup
+    subparsers.add_parser("dedup", help="Varre a base e unifica alegações duplicadas")
+
     # Subcomando search
     p_search = subparsers.add_parser("search", help="Busca alegações por proximidade semântica")
     p_search.add_argument("query", type=str, help="Texto da alegação a buscar")
@@ -228,6 +246,8 @@ def main():
         cmd_stats(args, kb)
     elif args.command == "list":
         cmd_list(args, kb)
+    elif args.command == "dedup":
+        cmd_dedup(args, kb)
     elif args.command == "search":
         cmd_search(args, kb)
     elif args.command == "show":
