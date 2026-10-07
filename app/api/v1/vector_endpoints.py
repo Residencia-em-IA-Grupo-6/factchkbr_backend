@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.config import Settings, get_settings
@@ -142,3 +143,21 @@ def deduplicate_claims(
     vector_kb: VectorClaimKB = Depends(get_vector_kb_dep),
 ) -> dict[str, Any]:
     return vector_kb.deduplicate_collection()
+
+
+@router.post(
+    "/reset",
+    status_code=status.HTTP_200_OK,
+    summary="Resetar Coleção Vetorial",
+    description="Remove todas as alegações e recria a coleção vetorial limpa no ChromaDB.",
+)
+def reset_vector_collection(
+    vector_kb: VectorClaimKB = Depends(get_vector_kb_dep),
+) -> dict[str, Any]:
+    total_removed = vector_kb.reset()
+    return {
+        "status": "reset",
+        "total_removed": total_removed,
+        "collection_name": vector_kb.collection_name,
+    }
+

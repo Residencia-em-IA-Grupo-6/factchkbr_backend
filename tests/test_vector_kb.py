@@ -413,3 +413,42 @@ def test_api_deduplicate_endpoint(monkeypatch):
         assert "merged" in data
 
 
+def test_reset_collection(temp_vector_kb):
+    """Testa reset e recriação limpa da coleção no ChromaDB."""
+    temp_vector_kb.add_claim("Alegação de teste 1", verdict=Verdict.FAKE)
+    temp_vector_kb.add_claim("Alegação de teste 2", verdict=Verdict.VERDADEIRO)
+    assert temp_vector_kb.count() == 2
+
+    # Executa reset
+    removed = temp_vector_kb.reset()
+    assert removed == 2
+    assert temp_vector_kb.count() == 0
+
+    # Verifica se a coleção permanece utilizável após reset
+    new_id = temp_vector_kb.add_claim("Nova alegação após reset", verdict=Verdict.VERDADEIRO)
+    assert temp_vector_kb.count() == 1
+    item = temp_vector_kb.get_claim(new_id)
+    assert item is not None
+    assert item.statement == "Nova alegação após reset"
+
+
+def test_api_reset_endpoint(monkeypatch):
+    """Testa o endpoint POST /api/v1/vector/reset."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_kb = VectorClaimKB(persist_directory=tmp_dir, collection_name="api_reset_test")
+        test_kb.add_claim("Item para apagar", verdict=Verdict.SUSPEITO)
+        assert test_kb.count() == 1
+
+        import app.services.vector_kb as vk_module
+        monkeypatch.setattr(vk_module, "_vector_kb_instance", test_kb)
+
+        client = TestClient(app)
+        res = client.post("/api/v1/vector/reset")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "reset"
+        assert data["total_removed"] == 1
+        assert test_kb.count() == 0
+
+
+

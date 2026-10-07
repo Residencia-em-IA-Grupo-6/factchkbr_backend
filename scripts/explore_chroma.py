@@ -7,6 +7,7 @@ Uso:
     python scripts/explore_chroma.py list [--limit 10]
     python scripts/explore_chroma.py search "água com limão" [--limit 3]
     python scripts/explore_chroma.py show <claim_id>
+    python scripts/explore_chroma.py reset [--force]
     python scripts/explore_chroma.py (modo interativo)
 """
 
@@ -180,6 +181,38 @@ def cmd_dedup(args, kb):
     print("=" * 76)
 
 
+def cmd_reset(args, kb):
+    force = getattr(args, "force", False)
+    total = kb.count()
+    print_banner()
+
+    if total == 0:
+        print("ℹ️  A base vetorial já está vazia. Nenhuma alegação para remover.")
+        print("=" * 76)
+        return
+
+    if not force:
+        print(f"⚠️  ATENÇÃO: A base vetorial contém {total} alegação(ões) indexada(s).")
+        print("    Esta operação é IRREVERSÍVEL e removerá todos os vetores e metadados.")
+        try:
+            confirm = input("\nTem certeza que deseja apagar todas as alegações gravadas? (s/N): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Operação cancelada.")
+            print("=" * 76)
+            return
+
+        if confirm not in ("s", "sim", "y", "yes"):
+            print("❌ Operação cancelada pelo usuário. Nenhum dado foi alterado.")
+            print("=" * 76)
+            return
+
+    print("🗑️  Resetando a coleção do ChromaDB...")
+    removed_count = kb.reset()
+    print(f"✅ Base vetorial resetada com sucesso! {removed_count} registro(s) removido(s).")
+    print(f"📦 Coleção '{kb.collection_name}' recriada vazia e pronta para novas indexações.")
+    print("=" * 76)
+
+
 def interactive_mode(kb):
     print_banner()
     print("Modo Interativo iniciado. Digite comandos ou termos para buscar:")
@@ -187,6 +220,7 @@ def interactive_mode(kb):
     print("  • 'list'  -> lista os registros gravados")
     print("  • 'stats' -> estatísticas gerais do ChromaDB")
     print("  • 'dedup' -> unifica registros duplicados")
+    print("  • 'reset' -> apaga/reseta todas as alegações do banco")
     print("  • 'show <id>' -> detalha um item por ID")
     print("  • 'exit' ou 'sair' -> encerra")
     print("=" * 76)
@@ -205,6 +239,8 @@ def interactive_mode(kb):
                 cmd_list(argparse.Namespace(limit=15), kb)
             elif line.lower() == "dedup":
                 cmd_dedup(None, kb)
+            elif line.lower() == "reset":
+                cmd_reset(argparse.Namespace(force=False), kb)
             elif line.lower().startswith("show "):
                 cid = line.split(" ", 1)[1].strip()
                 cmd_show(argparse.Namespace(claim_id=cid), kb)
@@ -229,6 +265,10 @@ def main():
     # Subcomando dedup
     subparsers.add_parser("dedup", help="Varre a base e unifica alegações duplicadas")
 
+    # Subcomando reset
+    p_reset = subparsers.add_parser("reset", help="Reseta e apaga todas as alegações do banco vetorial")
+    p_reset.add_argument("--force", "-f", action="store_true", help="Executa o reset sem solicitar confirmação interativa")
+
     # Subcomando search
     p_search = subparsers.add_parser("search", help="Busca alegações por proximidade semântica")
     p_search.add_argument("query", type=str, help="Texto da alegação a buscar")
@@ -248,6 +288,8 @@ def main():
         cmd_list(args, kb)
     elif args.command == "dedup":
         cmd_dedup(args, kb)
+    elif args.command == "reset":
+        cmd_reset(args, kb)
     elif args.command == "search":
         cmd_search(args, kb)
     elif args.command == "show":
@@ -258,3 +300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

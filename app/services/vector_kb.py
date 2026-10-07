@@ -506,14 +506,25 @@ class VectorClaimKB:
             "removed_ids": removed_ids,
         }
 
-    def clear(self) -> None:
-        """Remove todas as alegações da coleção atual."""
+    def reset(self) -> int:
+        """
+        Remove todas as alegações da coleção e recria a coleção vazia com as configurações originais.
+        Retorna o total de registros que foram removidos.
+        """
+        total = self.count()
         try:
             self.client.delete_collection(name=self.collection_name)
-            self._collection = None
-            logger.info("Coleção '%s' do ChromaDB limpa.", self.collection_name)
         except Exception as e:
-            logger.warning("Erro ao limpar coleção ChromaDB: %s", e)
+            logger.warning("Aviso ao deletar coleção '%s' durante reset: %s", self.collection_name, e)
+        self._collection = None
+        _ = self.collection  # Força a recriação da coleção vazia com a métrica configurada
+        logger.info("Base vetorial '%s' resetada com sucesso. %d registros removidos.", self.collection_name, total)
+        return total
+
+    def clear(self) -> None:
+        """Remove todas as alegações da coleção atual."""
+        self.reset()
+
 
     def get_stats(self) -> dict[str, Any]:
         """Retorna métricas operacionais do serviço vetorial."""
