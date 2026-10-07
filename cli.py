@@ -120,11 +120,18 @@ def print_step_trace(step_name: str, result: AnalyzerResult, duration: float, ra
         lat_count = raw.get("lateral_reading_count", 0)
         is_quant = raw.get("is_quantitative", False)
         v_str = result.verdict.value if result.verdict else "INCONCLUSIVO"
+        is_cached = raw.get("vector_cache_hit", False)
 
-        print(f"\n[{now_str}] ── [3/4] 🌐 BUSCA DE EVIDÊNCIAS EXTERNAS ({duration:.3f}s) " + "─" * 26)
-        print(f"      • Escopos Consultados:   Google Fact Check Tools ({fc_count}) + Leitura Horizontal ({lat_count})")
-        if is_quant:
-            print(f"      • Filtro Quantitativo:   Ativo (sobreposição temática com repositórios oficiais)")
+        if is_cached:
+            sim_val = raw.get("vector_similarity", 1.0) * 100
+            print(f"\n[{now_str}] ── [3/4] ⚡ BASE VETORIAL (MEMÓRIA PERSISTENTE) ({duration:.3f}s) " + "─" * 15)
+            print("      • Status da Alegação:    🎯 JÁ ANALISADA PREVIAMENTE (Buscas externas dispensadas)")
+            print(f"      • Similaridade Vetorial: {sim_val:.1f}% com checagem histórica consolidada")
+        else:
+            print(f"\n[{now_str}] ── [3/4] 🌐 BUSCA DE EVIDÊNCIAS EXTERNAS ({duration:.3f}s) " + "─" * 26)
+            print(f"      • Escopos Consultados:   Google Fact Check Tools ({fc_count}) + Leitura Horizontal ({lat_count})")
+            if is_quant:
+                print(f"      • Filtro Quantitativo:   Ativo (sobreposição temática com repositórios oficiais)")
 
         if evidences:
             print(f"      • Evidências Recuperadas ({len(evidences)}):")

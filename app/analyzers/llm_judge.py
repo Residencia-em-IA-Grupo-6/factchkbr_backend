@@ -103,8 +103,12 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                 "e devem ser julgadas como FAKE (provavelmente falso).\n\n"
             )
 
+        is_vector_cached = any(sc.get("vector_cache_hit", False) for sc in (sub_claims or []))
         if sub_claims:
-            user_content += "Vereditos determinados pelo modelo de decisão matemática (Plumb-4B) para cada alegação:\n"
+            if is_vector_cached:
+                user_content += "Vereditos e fundamentações consolidadas recuperadas da Base Vetorial (ChromaDB):\n"
+            else:
+                user_content += "Vereditos determinados pelo modelo de decisão matemática (Plumb-4B) para cada alegação:\n"
             for i, sc in enumerate(sub_claims, 1):
                 s_stmt = sc.get("statement", "")
                 s_v = sc.get("verdict", "")
@@ -117,13 +121,26 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
                 except (ValueError, TypeError):
                     s_conf = 0.80
                 user_content += f"  [{i}] \"{s_stmt}\" ➔ Veredito: {s_v_str} (Confiança: {s_conf:.2f})\n"
-            user_content += (
-                "\nSUA TAREFA EXCLUSIVA É JORNALÍSTICA E EDITORIAL:\n"
-                "- Redija o resumo ('summary'), as razões fáticas ('reasons') e as justificativas em 'claims_evaluation' "
-                "fundamentando POR QUE cada alegação recebeu esse veredito específico com base nas evidências.\n"
-                "- Mantenha RIGOROSAMENTE o veredito ('verdict') de cada alegação definido acima.\n"
-                "- No campo 'confidence', retorne SEMPRE um número decimal entre 0.0 e 1.0 (ex: 0.85; NUNCA use porcentagem ou valores maiores que 1.0).\n\n"
-            )
+                just = sc.get("justification", "")
+                if is_vector_cached and just:
+                    user_content += f"      Fundamentação consolidada: {just}\n"
+
+            if is_vector_cached:
+                user_content += (
+                    "\n⚡ AVISO DE BASE VETORIAL (MEMÓRIA PERSISTENTE):\n"
+                    "- Esta alegação já foi apurada e validada previamente no banco de dados vetorial.\n"
+                    "- Redija o resumo ('summary'), as razões fáticas ('reasons') e as justificativas em 'claims_evaluation' "
+                    "alinhadas à fundamentação já consolidada na checagem anterior, mantendo com fidelidade absoluta o veredito.\n"
+                    "- No campo 'confidence', retorne SEMPRE um número decimal entre 0.0 e 1.0 (ex: 0.85; NUNCA use porcentagem ou valores maiores que 1.0).\n\n"
+                )
+            else:
+                user_content += (
+                    "\nSUA TAREFA EXCLUSIVA É JORNALÍSTICA E EDITORIAL:\n"
+                    "- Redija o resumo ('summary'), as razões fáticas ('reasons') e as justificativas em 'claims_evaluation' "
+                    "fundamentando POR QUE cada alegação recebeu esse veredito específico com base nas evidências.\n"
+                    "- Mantenha RIGOROSAMENTE o veredito ('verdict') de cada alegação definido acima.\n"
+                    "- No campo 'confidence', retorne SEMPRE um número decimal entre 0.0 e 1.0 (ex: 0.85; NUNCA use porcentagem ou valores maiores que 1.0).\n\n"
+                )
 
         if heuristic_features and heuristic_features.get("composite_sensationalism_score", 0) > 0.50:
             score = heuristic_features["composite_sensationalism_score"]

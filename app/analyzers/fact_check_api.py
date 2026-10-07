@@ -550,6 +550,31 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         return evidences
 
+    def find_cached_claim(self, query: str) -> Any | None:
+        """
+        Verifica se a alegação já foi analisada e persistida no ChromaDB com alta similaridade semântica.
+        Retorna o VectorClaimItem correspondente caso atinja o limiar de bypass de buscas externas.
+        """
+        try:
+            from app.services.vector_kb import get_vector_kb
+            kb = get_vector_kb()
+            settings = get_settings()
+            if not settings.VECTOR_SEARCH_ENABLED or kb.count() == 0:
+                return None
+
+            threshold = getattr(settings, "VECTOR_SEARCH_BYPASS_THRESHOLD", 0.80)
+            matches = kb.search_claims(
+                query=query,
+                limit=1,
+                min_similarity=threshold,
+            )
+            if matches and (matches[0].similarity or 0.0) >= threshold:
+                return matches[0]
+        except Exception as e:
+            logger.debug("Falha ao verificar cache de alegação no ChromaDB: %s", e)
+
+        return None
+
     def inspect_local_health_kb(self, query: str) -> list[EvidenceItem]:
         """
         Camada 1: Consulta a Base Local de Saúde (Anvisa) em SQLite.
@@ -922,7 +947,74 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
         """
         clean_text = claim_text.strip()
 
-        # Camada 0: Consulta prévia à base vetorial persistente (ChromaDB)
+        # Camada 0: Consulta prévia ao ChromaDB.
+        # Se a alegação já foi previamente analisada (alta similaridade semântica),
+        # dispensa buscas externas e aproveita a fundamentação persistida imediatamente.
+        cached_claim = self.find_cached_claim(clean_text)
+        if cached_claim:
+            sim_pct = int((cached_claim.similarity or 1.0) * 100)
+            logger.info(
+                "⚡ [Fast-Path Vetorial] Alegação '%s' já analisada no ChromaDB (id=%s, veredito=%s, similaridade=%d%%). "
+                "Dispensando buscas externas e partindo diretamente para o julgamento consolidado.",
+                clean_text[:60], cached_claim.id, cached_claim.verdict.value, sim_pct
+            )
+
+            stance = "SUPPORTS" if cached_claim.verdict == Verdict.VERDADEIRO else ("REFUTES" if cached_claim.verdict == Verdict.FAKE else "NEUTRAL")
+            first_source = cached_claim.sources[0] if cached_claim.sources else f"vector://claims/{cached_claim.id}"
+
+            snippet = (
+                f"Checagem anterior na base vetorial (Similaridade: {sim_pct}%, Confiança: {int(cached_claim.confidence * 100)}%): "
+                f"Veredito {cached_claim.verdict.value}. Justificativa: {cached_claim.summary}"
+            )
+            if cached_claim.reasons:
+                snippet += f" Motivos: {' | '.join(cached_claim.reasons[:2])}"
+
+            cached_ev = EvidenceItem(
+                title=f"Base Vetorial [{cached_claim.verdict.value}]: {cached_claim.statement}",
+                source_name="Base Vetorial FactChkBR (ChromaDB)",
+                url=first_source,
+                snippet=snippet[:320],
+                rating=cached_claim.verdict.value,
+                is_fact_check=True,
+                published_date=cached_claim.created_at,
+                claim_reviewed=cached_claim.statement,
+                source_tier=SourceTier.TIER1_OFFICIAL_OR_IFCN.value,
+                stance=stance,
+                is_relevant=True,
+            )
+
+            all_evidences = [cached_ev] + (extra_evidences or [])
+            all_sources = cached_claim.sources if cached_claim.sources else [f"Base Vetorial FactChkBR (ChromaDB): {cached_claim.statement}"]
+
+            justification = (
+                cached_claim.summary
+                or (cached_claim.reasons[0] if cached_claim.reasons else f"Alegação previamente analisada e validada como {cached_claim.verdict.value}.")
+            )
+            reasons = list(cached_claim.reasons) if cached_claim.reasons else [
+                f"Alegação previamente checada no banco vetorial com veredito {cached_claim.verdict.value} (Similaridade: {sim_pct}%)."
+            ]
+
+            return {
+                "statement": clean_text,
+                "verdict": cached_claim.verdict,
+                "confidence": cached_claim.confidence,
+                "justification": justification,
+                "reasons": reasons,
+                "sources": all_sources,
+                "decision_engine": "vector_cache (chromadb)",
+                "probabilities": {},
+                "evidences": [e.model_dump() for e in all_evidences[:6]],
+                "vector_kb_count": 1,
+                "vector_cache_hit": True,
+                "vector_similarity": cached_claim.similarity,
+                "anvisa_local_count": 0,
+                "google_fact_check_count": 0,
+                "lateral_reading_count": 0,
+                "clinical_trials_count": 0,
+                "biomedical_count": 0,
+            }
+
+        # Camada 0 (contexto geral): Consulta à base vetorial se não houver match direto
         vector_evidences = self.inspect_vector_kb(clean_text)
 
         # Camada 1: Consulta local e instantânea à base oficial ANVISA (se disponível)
@@ -1116,7 +1208,22 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
 
         verdict, confidence, reasons = self.aggregate_sub_verdicts(sub_results)
 
-        if len(sub_results) > 1:
+        any_cache_hit = any(sr.get("vector_cache_hit", False) for sr in sub_results)
+        all_cache_hit = all(sr.get("vector_cache_hit", False) for sr in sub_results) if sub_results else False
+        max_similarity = max((sr.get("vector_similarity", 0.0) for sr in sub_results), default=0.0) if any_cache_hit else 0.0
+
+        if all_cache_hit:
+            sim_pct = int(max_similarity * 100)
+            summary = (
+                f"⚡ Alegação já analisada previamente na base vetorial (Similaridade: {sim_pct}%). "
+                f"Buscas externas dispensadas. Veredito mantido: {verdict.value}."
+            )
+        elif any_cache_hit:
+            summary = (
+                f"⚡ Base vetorial: parte das alegações foi recuperada da memória persistente e dispensou buscas externas "
+                f"({len(all_evidences)} registro(s) no total)."
+            )
+        elif len(sub_results) > 1:
             summary = (
                 f"Varredura em fontes externas avaliou {len(sub_results)} alegações isoladamente. "
                 f"Resultado composto: {verdict.value} com {len(all_evidences)} registro(s) localizado(s)."
@@ -1138,6 +1245,8 @@ class FactCheckApiAnalyzer(BaseAnalyzer):
             sources=list(dict.fromkeys(all_sources))[:6] or ["Mídia de Referência e Órgãos Oficiais"],
             raw_details={
                 "total_evidences": len(all_evidences),
+                "vector_cache_hit": any_cache_hit,
+                "vector_similarity": max_similarity,
                 "vector_kb_count": total_vector_count,
                 "anvisa_local_count": total_anvisa_count,
                 "google_fact_check_count": total_fc_count,

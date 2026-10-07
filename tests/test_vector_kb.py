@@ -255,3 +255,47 @@ def test_api_vector_endpoints(monkeypatch):
         # Confirma que foi removido
         res_get_after = client.get(f"/api/v1/vector/claims/{claim_id}")
         assert res_get_after.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_fact_check_api_bypasses_external_searches_on_vector_cache_hit(monkeypatch):
+    """Garante que alegações previamente analisadas no ChromaDB dispensam buscas externas."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_kb = VectorClaimKB(persist_directory=tmp_dir, collection_name="fastpath_claims")
+        test_kb.add_claim(
+            statement="A Anvisa proibiu a venda de lote de azeite adulterado no país.",
+            verdict=Verdict.FAKE,
+            confidence=0.95,
+            summary="Azeite adulterado desmentido por órgãos oficiais.",
+            reasons=["Boato sem fundamentação em registros da Anvisa."],
+            sources=["https://anvisa.gov.br/comunicado-azeite"],
+        )
+
+        import app.services.vector_kb as vk_module
+        monkeypatch.setattr(vk_module, "_vector_kb_instance", test_kb)
+
+        from app.analyzers.fact_check_api import FactCheckApiAnalyzer
+        analyzer = FactCheckApiAnalyzer()
+
+        # Monkeypatch das funções de busca externa para garantir que NENHUMA seja chamada
+        called_external = []
+        async def fake_search(*args, **kwargs):
+            called_external.append(True)
+            return []
+
+        monkeypatch.setattr(analyzer, "search_google_fact_check", fake_search)
+        monkeypatch.setattr(analyzer, "search_lateral_reading", fake_search)
+        monkeypatch.setattr(analyzer, "search_clinical_trials", fake_search)
+        monkeypatch.setattr(analyzer, "search_biomedical_literature", fake_search)
+
+        result = await analyzer.analyze("A Anvisa proibiu a venda de lote de azeite adulterado no país.", [])
+
+        # Nenhuma busca externa deve ter sido chamada
+        assert len(called_external) == 0
+        assert result.verdict == Verdict.FAKE
+        assert result.raw_details.get("vector_cache_hit") is True
+        assert result.raw_details.get("google_fact_check_count") == 0
+        assert result.raw_details.get("lateral_reading_count") == 0
+        assert "⚡ Alegação já analisada previamente" in result.summary
+        await analyzer.aclose()
+

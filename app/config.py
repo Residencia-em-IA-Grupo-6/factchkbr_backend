@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     CHROMA_COLLECTION_NAME: str = "fact_claims"
     VECTOR_SEARCH_ENABLED: bool = True
     VECTOR_SIMILARITY_THRESHOLD: float = 0.70
+    VECTOR_SEARCH_BYPASS_THRESHOLD: float = 0.80
     VECTOR_AUTO_INDEX: bool = True
 
     def get_llm_endpoint(self) -> str:
