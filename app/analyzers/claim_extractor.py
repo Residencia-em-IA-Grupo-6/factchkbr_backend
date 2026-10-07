@@ -360,9 +360,10 @@ class LLMClaimDecomposer:
 
     def __init__(self, http_client: httpx.AsyncClient | None = None, cache_maxsize: int = 1024) -> None:
         self.settings = get_settings()
-        self._owned_client = http_client is None
+        endpoint = self.settings.get_llm_endpoint()
+        is_local = "127.0.0.1" in endpoint or "localhost" in endpoint or self.settings.LLM_PROVIDER.lower() == "ollama"
         self.http_client = http_client or httpx.AsyncClient(
-            timeout=65.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
+            timeout=65.0 if is_local else 20.0,
             limits=httpx.Limits(max_keepalive_connections=25, max_connections=50),
         )
         self._cache_maxsize = cache_maxsize
@@ -628,8 +629,10 @@ class ClaimExtractorAnalyzer(BaseAnalyzer):
         super().__init__()
         self.settings = get_settings()
         self.preprocessor = SpacyPreprocessor()
+        endpoint = self.settings.get_llm_endpoint()
+        is_local = "127.0.0.1" in endpoint or "localhost" in endpoint or self.settings.LLM_PROVIDER.lower() == "ollama"
         self.http_client = httpx.AsyncClient(
-            timeout=65.0 if self.settings.LLM_PROVIDER.lower() == "ollama" else 15.0,
+            timeout=65.0 if is_local else 20.0,
             limits=httpx.Limits(max_keepalive_connections=25, max_connections=50),
         )
         self.decomposer = LLMClaimDecomposer(self.http_client)

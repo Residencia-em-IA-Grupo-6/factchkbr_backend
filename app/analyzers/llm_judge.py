@@ -180,7 +180,8 @@ class LlmJudgeAnalyzer(BaseAnalyzer):
         )
 
         try:
-            timeout = 65.0 if provider.lower() == "ollama" else 15.0
+            is_local = "127.0.0.1" in endpoint or "localhost" in endpoint or provider.lower() == "ollama"
+            timeout = 65.0 if is_local else 20.0
             is_ollama = provider.lower() == "ollama"
             if is_ollama:
                 payload = {
