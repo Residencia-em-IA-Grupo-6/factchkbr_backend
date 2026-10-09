@@ -37,6 +37,11 @@ CLAIM_CRITERIA: dict[str, str] = {
     "inconclusivo": "insufficient evidence to verify or refute, ongoing investigation, or lack of conclusive data",
 }
 
+BINARY_CLAIM_CRITERIA: dict[str, str] = {
+    "V": "factually true, verifiable reality, scientifically or historically accurate, real event, corroborated by facts",
+    "F": "factually false, fake news, fabricated claim, pseudoscience, debunked myth, hoax, misleading or baseless rumor",
+}
+
 
 class PlumbTopicResult(BaseModel):
     """Resultado da classificação de tópico gerado pelo Plumb-4B."""
@@ -55,6 +60,17 @@ class PlumbClaimResult(BaseModel):
     confidence: float = Field(..., description="Grau de certeza da decisão (0.0 a 1.0)")
     probabilities: dict[str, float] = Field(default_factory=dict, description="Distribuição de probabilidades por veredito")
     rationale_hint: str = Field(default="", description="Pista ou resumo do critério orientador da decisão")
+
+
+class PlumbBinaryResult(BaseModel):
+    """Resultado da checagem binária (V ou F) emitida pelo Plumb-4B."""
+    statement: str = Field(..., description="Alegação factual avaliada")
+    verdict: str = Field(..., description="Veredito binário emitido pelo Plumb-4B: 'V' ou 'F'")
+    confidence: float = Field(..., description="Grau de certeza da decisão (0.0 a 1.0)")
+    probabilities: dict[str, float] = Field(default_factory=dict, description="Distribuição de probabilidades entre V e F")
+    prob_true: float = Field(..., description="Probabilidade de ser Verdadeiro (V)")
+    prob_false: float = Field(..., description="Probabilidade de ser Falso (F)")
+
 
 
 class PlumbTopicClassifier:
@@ -253,6 +269,70 @@ class PlumbTopicClassifier:
         Executa a avaliação de alegação de forma assíncrona em threadpool (sem bloquear o event loop).
         """
         return await asyncio.to_thread(self.evaluate_claim, claim, evidences, context)
+
+    def evaluate_claim_binary(
+        self,
+        claim: str,
+        context: str | None = None,
+    ) -> PlumbBinaryResult | None:
+        """
+        Avalia a veracidade factual de forma estritamente binária (V ou F) com mínima latência.
+        Utiliza 1 única passagem de inferência calibrada pelo JevK5.
+        """
+        agent = self._ensure_loaded()
+        if agent is None:
+            return None
+
+        clean_claim = claim.strip()
+        if not clean_claim:
+            return None
+
+        input_text = clean_claim if not context else f"{clean_claim}\nContexto: {context.strip()[:600]}"
+        truncated_text = input_text[:2000]
+
+        question = {
+            "type": "choice",
+            "instructions": (
+                "Evaluate the factual truthfulness of the target statement. "
+                "Is it factually true (V) or factually false/fake (F)?"
+            ),
+            "criteria": BINARY_CLAIM_CRITERIA,
+        }
+
+        try:
+            res = agent.decide(truncated_text, question)
+            choice = str(res.get("choice", "F")).upper()
+            if choice not in ("V", "F"):
+                choice = "F" if choice in ("FAKE", "FALSE", "0") else "V"
+
+            raw_probs = res.get("probabilities", {})
+            conf = float(res.get("confidence", 0.50))
+
+            p_v = round(float(raw_probs.get("V", 0.50)), 4)
+            p_f = round(float(raw_probs.get("F", 0.50)), 4)
+
+            return PlumbBinaryResult(
+                statement=clean_claim,
+                verdict=choice,
+                confidence=round(conf, 4),
+                probabilities={"V": p_v, "F": p_f},
+                prob_true=p_v,
+                prob_false=p_f,
+            )
+        except Exception as exc:
+            logger.warning("Falha na avaliação binária do Plumb-4B (%s): %s", type(exc).__name__, exc)
+            return None
+
+    async def evaluate_claim_binary_async(
+        self,
+        claim: str,
+        context: str | None = None,
+    ) -> PlumbBinaryResult | None:
+        """
+        Executa a avaliação binária de forma assíncrona em threadpool (sem bloquear o event loop).
+        """
+        return await asyncio.to_thread(self.evaluate_claim_binary, claim, context)
+
 
 
 # Helper singleton
