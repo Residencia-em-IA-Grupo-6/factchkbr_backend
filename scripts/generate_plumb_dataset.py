@@ -198,14 +198,14 @@ def main():
     parser.add_argument(
         "--strategy", "-s",
         type=str,
-        choices=["lead", "spacy", "sentences", "full"],
-        default="lead",
-        help="Estratégia para transformar a notícia em alegação curta: 'lead' (lide informativo conciso), 'spacy' (sentenças com predicado factual), 'sentences', 'full'.",
+        choices=["plumb", "spacy", "lead", "sentences", "full"],
+        default="spacy",
+        help="Estratégia para transformar a notícia em alegações curtas: 'plumb' (decomposição neural via Plumb-4B), 'spacy' (segmentação em sentenças declarativas sem discurso indireto), 'lead' (lide conciso), 'full'.",
     )
     parser.add_argument(
         "--max-claims-per-news",
         type=int,
-        default=1,
+        default=5,
         help="Quantidade máxima de alegações extraídas por notícia.",
     )
     parser.add_argument(

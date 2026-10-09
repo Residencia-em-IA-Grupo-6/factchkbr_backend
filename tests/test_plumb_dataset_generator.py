@@ -212,4 +212,42 @@ def test_plumb_dataset_generator_process_batch():
     assert records[1].veredito in ("V", "F")
 
 
+def test_claim_condenser_reporting_clause_stripping():
+    """Testa remoção de cláusulas de discurso indireto em notícias/boatos."""
+    fake_headline = "Mensagens em redes sociais afirmam que as novas vacinas contêm microchips 5G."
+    clean = ClaimCondenser.clean_claim_statement(fake_headline)
+    assert not clean.startswith("Mensagens")
+    assert not clean.startswith("afirmam que")
+    assert "vacinas contêm microchips 5g" in clean.lower()
+
+
+def test_plumb_dataset_generator_multi_claims_per_news():
+    """Testa quebra de uma notícia em múltiplas alegações e geração de sub-IDs (ex: 101_1, 101_2)."""
+    clf = get_plumb_classifier()
+    agent = clf._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente")
+
+    generator = PlumbDatasetGenerator(classifier=clf)
+    body = (
+        "A Anvisa determinou a suspensão da venda de um lote de medicamento adulterado no Brasil. "
+        "Laudos laboratoriais confirmaram a presença de impurezas acima dos limites tolerados. "
+        "A empresa fabricante iniciou o recolhimento voluntário dos produtos em todas as farmácias."
+    )
+    records = generator.process_item(
+        item_id="101",
+        raw_text=body,
+        title="Anvisa suspende lote de remédio",
+        strategy="spacy",
+        max_claims=3,
+    )
+    assert len(records) >= 2
+    for r in records:
+        assert isinstance(r, PlumbDatasetRecord)
+        assert str(r.id).startswith("101_")
+        assert r.tema == "Saúde"
+        assert r.veredito in ("V", "F")
+
+
+
 

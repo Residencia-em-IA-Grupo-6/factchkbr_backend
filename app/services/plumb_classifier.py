@@ -513,6 +513,58 @@ class PlumbTopicClassifier:
             logger.warning("Falha no batch_evaluate_claim_binary (%s): %s. Executando fallback sequencial.", type(exc).__name__, exc)
             return [self.evaluate_claim_binary(c, ctx) for c, ctx in zip(claims, contexts_list)]
 
+    def decompose_news(self, text: str, max_claims: int = 5) -> list[str]:
+        """
+        Decompõe o texto de uma notícia em múltiplas alegações atômicas e factuais,
+        removendo enquadramentos e discurso indireto.
+        """
+        clean = text.strip()[:2500]
+        if not clean:
+            return []
+
+        agent = self._ensure_loaded()
+        if agent is not None and hasattr(agent, "model") and hasattr(agent, "tok"):
+            try:
+                import torch
+                prompt_content = (
+                    "Você é um especialista em fact-checking. Quebre o texto a seguir em todas as suas "
+                    "alegações factuais atômicas, curtas e diretas. Remova discurso indireto (como "
+                    "\"mensagens afirmam que\", \"o texto diz que\", \"circula que\") e converta cada alegação "
+                    f"em uma oração afirmativa direta. Retorne até {max_claims} alegações principais, "
+                    "uma por linha iniciando com hífen (-):\n\n"
+                    f"Texto:\n{clean}\n\nAlegações:"
+                )
+                prompt = agent.tok.apply_chat_template(
+                    [{"role": "user", "content": prompt_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                inp = agent.tok(prompt, return_tensors="pt").to(agent.device)
+                with torch.inference_mode():
+                    out = agent.model.generate(**inp, max_new_tokens=180, do_sample=False)
+                res = agent.tok.decode(out[0][inp.input_ids.shape[1]:], skip_special_tokens=True)
+                claims = []
+                for line in res.split("\n"):
+                    line_s = line.strip()
+                    if line_s.startswith(("-", "*", "•")):
+                        claim = line_s.lstrip("-*•").strip()
+                    elif re.match(r"^\d+[\.\)]", line_s):
+                        claim = re.sub(r"^\d+[\.\)]", "", line_s).strip()
+                    else:
+                        claim = line_s
+                    if len(claim) >= 20 and len(claim.split()) >= 4 and not claim.endswith("?"):
+                        claims.append(claim)
+                        if len(claims) >= max_claims:
+                            break
+                if claims:
+                    return claims
+            except Exception as exc:
+                logger.warning("Falha na geração PyTorch decompose_news: %s", exc)
+
+        from app.services.plumb_dataset_generator import ClaimCondenser
+        return ClaimCondenser().extract_claims(clean, strategy="spacy", max_claims=max_claims)
+
 
 
 def parse_fused_probabilities(raw_probs: dict[str, float], statement: str) -> PlumbFusedResult:
@@ -728,6 +780,55 @@ class MLXPlumbClassifier:
             return get_plumb_classifier().batch_evaluate_claim_binary(claims, contexts)
         contexts_list = contexts or ([None] * len(claims))
         return [self.evaluate_claim_binary(c, ctx) for c, ctx in zip(claims, contexts_list)]
+
+    def decompose_news(self, text: str, max_claims: int = 5) -> list[str]:
+        """Decompõe o texto de uma notícia em múltiplas alegações atômicas diretas via Apple MLX."""
+        if not self._ensure_loaded() or getattr(self, "_disabled", False):
+            fallback = get_plumb_classifier()
+            return fallback.decompose_news(text, max_claims=max_claims)
+
+        clean = text.strip()[:2500]
+        if not clean:
+            return []
+
+        prompt_content = (
+            "Você é um especialista em fact-checking. Quebre o texto a seguir em todas as suas "
+            "alegações factuais atômicas, curtas e diretas. Remova discurso indireto (como "
+            "\"mensagens afirmam que\", \"o texto diz que\", \"circula que\") e converta cada alegação "
+            f"em uma oração afirmativa direta. Retorne até {max_claims} alegações principais, "
+            "uma por linha iniciando com hífen (-):\n\n"
+            f"Texto:\n{clean}\n\nAlegações:"
+        )
+
+        try:
+            import mlx_lm
+            prompt = self._tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt_content}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            res = mlx_lm.generate(self._model, self._tokenizer, prompt=prompt, max_tokens=180)
+            claims = []
+            for line in res.split("\n"):
+                line_s = line.strip()
+                if line_s.startswith(("-", "*", "•")):
+                    claim = line_s.lstrip("-*•").strip()
+                elif re.match(r"^\d+[\.\)]", line_s):
+                    claim = re.sub(r"^\d+[\.\)]", "", line_s).strip()
+                else:
+                    claim = line_s
+                if len(claim) >= 20 and len(claim.split()) >= 4 and not claim.endswith("?"):
+                    claims.append(claim)
+                    if len(claims) >= max_claims:
+                        break
+            if claims:
+                return claims
+            return [clean[:200]]
+        except Exception as exc:
+            logger.warning("Falha na geração MLX decompose_news (%s): %s", type(exc).__name__, exc)
+            fallback = get_plumb_classifier()
+            return fallback.decompose_news(text, max_claims=max_claims)
 
 
 

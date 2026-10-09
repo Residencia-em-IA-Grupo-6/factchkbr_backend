@@ -49,6 +49,15 @@ RE_CLEAN_HEADER = re.compile(
 RE_EMOJIS_PUNCT = re.compile(r"[🚨⚠️💣🔥🛑📢👀⚡🇧🇷❌‼️⁉️]+")
 RE_MULTIPLE_SPACES = re.compile(r"\s+")
 RE_MULTIPLE_PUNCT = re.compile(r"([!?.]){2,}")
+RE_REPORTING = re.compile(
+    r"^(?:(?:mensagens?|publicaç(?:ão|ões)|vídeos?|áudios?|boatos?|postagens?|posts?|usuários?|conteúdos?|textos?)"
+    r"(?:\s+(?:compartilhados?|viralizados?|divulgados?))?"
+    r"(?:\s+(?:nas|em|pelas)\s+redes\s+sociais|\s+(?:na|pela)\s+internet|\s+(?:no|pelo)\s+whatsapp|\s+online|\s+no\s+telegram)?"
+    r"\s+(?:afirmam?|dizem?|alegam?|garantem?|mostram?|prometem?|indicam?|sustentam?|divulgam?)\s+(?:que\s+|de\s+que\s+|uma\s+|a\s+)?"
+    r"|(?:circula|compartilhado|viralizou|espalhou-se|corre)\s+(?:(?:nas|em)\s+redes|(?:no|pelo)\s+whatsapp|(?:no|pelo)\s+facebook|(?:no|pelo)\s+telegram|na\s+internet)?\s*(?:que|boato de que|afirmação de que)?\s*"
+    r"|(?:segundo|de acordo com|conforme)\s+[^,.:]+,\s*)",
+    re.IGNORECASE,
+)
 
 
 class ClaimCondenser:
@@ -65,12 +74,16 @@ class ClaimCondenser:
         if ClaimCondenser._nlp is None:
             import spacy
             try:
-                ClaimCondenser._nlp = spacy.load(self.spacy_model, exclude=["lemmatizer", "ner"])
+                nlp = spacy.load(self.spacy_model, exclude=["lemmatizer", "ner", "parser"])
+                nlp.add_pipe("sentencizer")
+                ClaimCondenser._nlp = nlp
             except Exception:
                 # Tenta modelos alternativos se disponíveis
                 for alt in ("pt_core_news_md", "pt_core_news_lg"):
                     try:
-                        ClaimCondenser._nlp = spacy.load(alt, exclude=["lemmatizer", "ner"])
+                        nlp = spacy.load(alt, exclude=["lemmatizer", "ner", "parser"])
+                        nlp.add_pipe("sentencizer")
+                        ClaimCondenser._nlp = nlp
                         break
                     except Exception:
                         pass
@@ -90,12 +103,20 @@ class ClaimCondenser:
         t = RE_MULTIPLE_SPACES.sub(" ", t).strip()
         return t
 
+    @staticmethod
+    def clean_claim_statement(claim: str) -> str:
+        """Remove orações atributivas de discurso indireto para isolar o fato falseável."""
+        c = RE_REPORTING.sub("", claim.strip()).strip()
+        if c and c[0].islower():
+            c = c[0].upper() + c[1:]
+        return c
+
     def extract_lead_claim(self, text: str, title: str | None = None) -> str:
         """
-        Extrai o lide principal (a afirmação mais factual e representativa) da notícia.
-        Se o título for informativo e factual, pode ser aproveitado como base.
+        Extrai o lide principal (a afirmação mais factual e representativa) da notícia,
+        limpando enquadramentos de discurso indireto.
         """
-        clean_title = self.clean_raw_text(title or "").strip()
+        clean_title = self.clean_claim_statement(self.clean_raw_text(title or "").strip())
         clean_body = self.clean_raw_text(text).strip()
 
         # Se o título já for uma oração factual substantiva completa (>= 4 palavras)
@@ -107,20 +128,17 @@ class ClaimCondenser:
         if not clean_body:
             return clean_title or ""
 
-        # Se o corpo da notícia já for uma frase ou parágrafo curto e conciso (<= 250 chars)
-        if len(clean_body) <= 250 and len(clean_body.split()) >= 4:
-            return clean_body
-
         # Divide o corpo em sentenças utilizando quebras de pontuação terminal legítimas
         raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean_body) if s.strip()]
         for s_str in raw_sentences:
-            if len(s_str) < 25 or len(s_str.split()) < 4 or s_str.endswith("?"):
+            s_clean = self.clean_claim_statement(s_str)
+            if len(s_clean) < 20 or len(s_clean.split()) < 4 or s_clean.endswith("?"):
                 continue
-            if len(s_str) <= 250:
-                return s_str
+            if len(s_clean) <= 250:
+                return s_clean
 
         # Se a primeira sentença for mais longa, tenta truncar no último espaço antes de 220
-        first_s = raw_sentences[0] if raw_sentences else clean_body
+        first_s = self.clean_claim_statement(raw_sentences[0] if raw_sentences else clean_body)
         if len(first_s) > 220:
             return first_s[:220].rsplit(" ", 1)[0] + "."
         return first_s
@@ -129,17 +147,16 @@ class ClaimCondenser:
         self,
         text: str,
         title: str | None = None,
-        max_claims: int = 1,
-        strategy: str = "lead",
+        max_claims: int = 5,
+        strategy: str = "spacy",
     ) -> list[str]:
         """
         Extrai N alegações candidatas a partir da notícia de acordo com a estratégia:
-        - 'lead': Retorna o lide principal informativo.
-        - 'spacy': Segmenta e retorna até max_claims sentenças factuais completas.
-        - 'title_lead': Combina título e lide em proposições separadas.
+        - 'spacy': Segmenta a matéria em múltiplas sentenças declarativas factuais, sem discurso indireto.
+        - 'lead': Retorna o lide principal informativo limpo.
         - 'full': Mantém o texto limpo se for curto, ou os primeiros 200 caracteres.
         """
-        clean_title = self.clean_raw_text(title or "").strip()
+        clean_title = self.clean_claim_statement(self.clean_raw_text(title or "").strip())
         clean_body = self.clean_raw_text(text).strip()
 
         if strategy == "lead":
@@ -155,10 +172,10 @@ class ClaimCondenser:
             nlp = self._get_spacy()
             corpus = f"{clean_title}. {clean_body}" if clean_title else clean_body
             if nlp is not None:
-                doc = nlp(corpus[:2500])
+                doc = nlp(corpus[:3000])
                 for sent in doc.sents:
-                    s_str = sent.text.strip()
-                    if len(s_str) < 25 or len(s_str.split()) < 4 or s_str.endswith("?"):
+                    s_str = self.clean_claim_statement(sent.text.strip())
+                    if len(s_str) < 20 or len(s_str.split()) < 4 or s_str.endswith("?"):
                         continue
                     has_verb = any(t.pos_ in ("VERB", "AUX") for t in sent)
                     if has_verb and s_str not in claims:
@@ -168,8 +185,8 @@ class ClaimCondenser:
             else:
                 sentences = re.split(r"(?<=[.!?])\s+", corpus)
                 for s in sentences:
-                    s_str = s.strip()
-                    if len(s_str) >= 25 and len(s_str.split()) >= 4 and not s_str.endswith("?"):
+                    s_str = self.clean_claim_statement(s.strip())
+                    if len(s_str) >= 20 and len(s_str.split()) >= 4 and not s_str.endswith("?"):
                         if s_str not in claims:
                             claims.append(s_str[:220])
                             if len(claims) >= max_claims:
@@ -282,28 +299,33 @@ class PlumbDatasetGenerator:
         item_id: str | int,
         raw_text: str,
         title: str | None = None,
-        strategy: str = "lead",
-        max_claims: int = 1,
+        strategy: str = "spacy",
+        max_claims: int = 5,
         extra_meta: dict[str, Any] | None = None,
     ) -> list[PlumbDatasetRecord]:
         """
-        Processa uma única notícia:
-        1. Condensa em 1..N alegações curtas (CPU).
-        2. Se fused=True, roda 1 único forward pass de Tema + Veredito (50% menos latência).
+        Processa uma notícia completa:
+        1. Decompõe o texto em 1..N alegações factuais atômicas (neural via Plumb-4B ou sintática via spaCy).
+        2. Para cada alegação extraída, roda a inferência de Tema + Veredito (V/F) pelo Plumb-4B.
         3. Se target_topics estiver ativo, aplica Early Exit para tópicos irrelevantes.
         """
-        claims = self.condenser.extract_claims(
-            text=raw_text,
-            title=title,
-            max_claims=max_claims,
-            strategy=strategy,
-        )
+        # Extração de alegações: neural via Plumb-4B ou sintática via spaCy
+        if strategy == "plumb" and hasattr(self.classifier, "decompose_news"):
+            claims = self.classifier.decompose_news(raw_text, max_claims=max_claims)
+        else:
+            claims = self.condenser.extract_claims(
+                text=raw_text,
+                title=title,
+                max_claims=max_claims,
+                strategy=strategy,
+            )
 
         if not claims:
             claims = [ClaimCondenser.clean_raw_text(raw_text)[:200]]
 
         records: list[PlumbDatasetRecord] = []
-        for claim in claims:
+        for idx, claim in enumerate(claims, start=1):
+            sub_id = f"{item_id}_{idx}" if len(claims) > 1 else item_id
             t_claim_start = time.perf_counter()
 
             # MODO 1: Fused Decision (1 único forward pass conjunto)
@@ -326,7 +348,7 @@ class PlumbDatasetGenerator:
                     dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
                     records.append(
                         PlumbDatasetRecord(
-                            id=item_id,
+                            id=sub_id,
                             noticia_original=raw_text[:1000],
                             alegacao=claim,
                             tema=topic,
@@ -354,7 +376,7 @@ class PlumbDatasetGenerator:
                 dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
                 records.append(
                     PlumbDatasetRecord(
-                        id=item_id,
+                        id=sub_id,
                         noticia_original=raw_text[:1000],
                         alegacao=claim,
                         tema=topic,
@@ -381,7 +403,7 @@ class PlumbDatasetGenerator:
             dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
             records.append(
                 PlumbDatasetRecord(
-                    id=item_id,
+                    id=sub_id,
                     noticia_original=raw_text[:1000],
                     alegacao=claim,
                     tema=topic,
@@ -401,8 +423,8 @@ class PlumbDatasetGenerator:
     def process_batch(
         self,
         batch: list[dict[str, Any]],
-        strategy: str = "lead",
-        max_claims: int = 1,
+        strategy: str = "spacy",
+        max_claims: int = 5,
     ) -> list[PlumbDatasetRecord]:
         """
         Processa um lote de itens agrupados utilizando batching paralelo no motor neural
@@ -413,37 +435,41 @@ class PlumbDatasetGenerator:
 
         # Se o classificador suportar batch_decide_fused e estiver em modo fused:
         if self.fused and hasattr(self.classifier, "batch_decide_fused"):
-            # 1. Extração rápida de alegações via CPU para todos os itens do lote
-            extracted_items: list[tuple[dict[str, Any], str]] = []
+            # 1. Extração de alegações para todos os itens do lote
+            extracted_items: list[tuple[dict[str, Any], str, str]] = []  # (item, claim, sub_id)
             for item in batch:
                 raw_text = item.get("text", "")
                 title = item.get("title")
-                claims = self.condenser.extract_claims(
-                    text=raw_text,
-                    title=title,
-                    max_claims=max_claims,
-                    strategy=strategy,
-                )
+                if strategy == "plumb" and hasattr(self.classifier, "decompose_news"):
+                    claims = self.classifier.decompose_news(raw_text, max_claims=max_claims)
+                else:
+                    claims = self.condenser.extract_claims(
+                        text=raw_text,
+                        title=title,
+                        max_claims=max_claims,
+                        strategy=strategy,
+                    )
                 if not claims:
                     claims = [ClaimCondenser.clean_raw_text(raw_text)[:200]]
-                for c in claims:
-                    extracted_items.append((item, c))
+                for sub_idx, c in enumerate(claims, start=1):
+                    sub_id = f"{item['id']}_{sub_idx}" if len(claims) > 1 else str(item["id"])
+                    extracted_items.append((item, c, sub_id))
 
             if not extracted_items:
                 return []
 
-            claims_list = [c for _, c in extracted_items]
+            claims_list = [c for _, c, _ in extracted_items]
             t0 = time.perf_counter()
             fused_results = self.classifier.batch_decide_fused(claims_list)
             dur_total_ms = (time.perf_counter() - t0) * 1000.0
             dur_per_claim_ms = round(dur_total_ms / max(len(claims_list), 1), 2)
 
             batch_records: list[PlumbDatasetRecord] = []
-            for (item, claim), fused_res in zip(extracted_items, fused_results):
+            for (item, claim, sub_id), fused_res in zip(extracted_items, fused_results):
                 if fused_res is None:
                     # Fallback individual caso algum item específico falhe
                     fallback_recs = self.process_item(
-                        item_id=item["id"],
+                        item_id=sub_id,
                         raw_text=item["text"],
                         title=item.get("title"),
                         strategy=strategy,
@@ -467,7 +493,7 @@ class PlumbDatasetGenerator:
 
                 batch_records.append(
                     PlumbDatasetRecord(
-                        id=item["id"],
+                        id=sub_id,
                         noticia_original=item["text"][:1000],
                         alegacao=claim,
                         tema=topic,
