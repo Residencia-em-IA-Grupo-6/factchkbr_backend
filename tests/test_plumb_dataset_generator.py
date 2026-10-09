@@ -118,3 +118,98 @@ def test_plumb_dataset_generator_process_item():
     assert r.prob_v >= 0.0
     assert r.prob_f >= 0.0
 
+
+def test_plumb_fused_decision_live():
+    """Testa a classificação unificada (Tema + Veredito) em 1 único forward pass."""
+    clf = get_plumb_classifier()
+    agent = clf._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente")
+
+    fused = clf.decide_fused("A vacina da gripe previne internações graves.")
+    assert fused is not None
+    assert fused.topic in ("Saúde", "Política", "Entretenimento", "Esportes", "Economia", "Outros")
+    assert fused.verdict in ("V", "F")
+    assert 0.0 <= fused.prob_v <= 1.0
+    assert 0.0 <= fused.prob_f <= 1.0
+    assert "Saúde" in fused.topic_probabilities
+
+
+def test_plumb_dataset_generator_early_exit():
+    """Testa Early Exit de filtragem condicional para temas fora do escopo selecionado."""
+    clf = get_plumb_classifier()
+    agent = clf._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente")
+
+    # Filtra apenas saúde no modo two-pass
+    generator = PlumbDatasetGenerator(
+        classifier=clf,
+        fused=False,
+        target_topics=["saúde", "saude"],
+    )
+
+    # Notícia de esportes
+    records = generator.process_item(
+        item_id="202",
+        raw_text="O time de basquete venceu a partida final e conquistou o título da liga.",
+        title="Basquete conquista título",
+    )
+    assert len(records) == 1
+    r = records[0]
+    assert r.tema == "Esportes"
+    assert r.veredito == "OUT_OF_SCOPE"  # Early Exit ativado, poupando 1 forward pass
+
+
+def test_plumb_batch_decide_fused_live():
+    """Testa a classificação unificada em lote (batching neural paralelo)."""
+    clf = get_plumb_classifier()
+    agent = clf._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente")
+
+    claims = [
+        "A vacina da gripe previne complicações pulmonares graves.",
+        "O Banco Central aumentou a taxa básica de juros para conter a inflação.",
+    ]
+    results = clf.batch_decide_fused(claims)
+    assert len(results) == 2
+    r0, r1 = results[0], results[1]
+    assert r0 is not None and r1 is not None
+    assert r0.topic == "Saúde"
+    assert r1.topic == "Economia"
+    assert r0.verdict in ("V", "F")
+    assert r1.verdict in ("V", "F")
+
+
+def test_plumb_dataset_generator_process_batch():
+    """Testa o gerador processando lote com múltiplas notícias via process_batch."""
+    clf = get_plumb_classifier()
+    agent = clf._ensure_loaded()
+    if agent is None:
+        pytest.skip("Modelo Plumb-4B não disponível no ambiente")
+
+    generator = PlumbDatasetGenerator(classifier=clf, fused=True)
+    batch = [
+        {
+            "id": "1",
+            "text": "O Ministério da Saúde liberou novos lotes de vacinas para os estados brasileiros.",
+            "title": "Novos lotes de vacinas liberados",
+        },
+        {
+            "id": "2",
+            "text": "A inflação oficial do país desacelerou no último trimestre segundo o IBGE.",
+            "title": "Inflação desacelera no trimestre",
+        },
+    ]
+    records = generator.process_batch(batch, strategy="lead", max_claims=1)
+    assert len(records) == 2
+    assert records[0].id == "1"
+    assert records[1].id == "2"
+    assert records[0].tema == "Saúde"
+    assert records[1].tema == "Economia"
+    assert records[0].veredito in ("V", "F")
+    assert records[1].veredito in ("V", "F")
+
+
+

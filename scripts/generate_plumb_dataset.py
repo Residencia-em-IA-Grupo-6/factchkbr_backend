@@ -80,13 +80,19 @@ def setup_logger(log_file: Path | None, verbose: bool = False) -> logging.Logger
 
 def print_banner(input_path: Path, output_path: Path, args: argparse.Namespace) -> None:
     """Exibe banner informativo no terminal."""
+    fused_label = "Two-Pass (2 forwards/notícia)" if getattr(args, "two_pass", False) else "Fused Decision (1 forward conjunto ⚡ 2x veloz)"
+    engine_label = getattr(args, "engine", "auto").upper()
+
     if HAS_RICH and console:
         grid = Table.grid(expand=True)
         grid.add_column(style="bold cyan", justify="left")
         grid.add_column(style="white", justify="left")
         grid.add_row("📁 Arquivo de Entrada: ", str(input_path))
         grid.add_row("💾 Arquivo de Saída:   ", str(output_path))
-        grid.add_row("🧠 Motor Neural:       ", "Plumb-4B (crh225/plumb-4b via JevK5)")
+        grid.add_row("🧠 Motor Neural:       ", f"Plumb-4B (Engine: {engine_label})")
+        grid.add_row("⚡ Modo de Inferência: ", fused_label)
+        if getattr(args, "filter_topics", None):
+            grid.add_row("🎯 Filtro de Tópicos:  ", str(args.filter_topics))
         grid.add_row("⚙️  Estratégia:         ", f"{args.strategy} (máx {args.max_claims_per_news} claim/notícia)")
         grid.add_row("🔄 Retomada (--resume):", "Ativada" if args.resume else "Desativada")
         if args.limit:
@@ -105,12 +111,15 @@ def print_banner(input_path: Path, output_path: Path, args: argparse.Namespace) 
         print("=" * 76)
         print(f"📁 Arquivo de Entrada: {input_path}")
         print(f"💾 Arquivo de Saída:   {output_path}")
-        print("🧠 Motor Neural:       Plumb-4B (crh225/plumb-4b via JevK5)")
+        print(f"🧠 Motor Neural:       Plumb-4B ({engine_label} | {fused_label})")
+        if getattr(args, "filter_topics", None):
+            print(f"🎯 Filtro de Tópicos:  {args.filter_topics}")
         print(f"⚙️  Estratégia:         {args.strategy} (máx {args.max_claims_per_news} claim/notícia)")
         print(f"🔄 Retomada (--resume): {'Ativada' if args.resume else 'Desativada'}")
         if args.limit:
             print(f"🔢 Limite:             {args.limit}")
         print("=" * 76)
+
 
 
 def load_processed_ids(output_path: Path, delimiter: str = "\t") -> set[str]:
@@ -234,6 +243,31 @@ def main():
         help="Caminho do arquivo de log detalhado (padrão: logs/plumb_dataset_<data_hora>.log).",
     )
     parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["auto", "mlx", "jevk5"],
+        default="auto",
+        help="Motor neural de inferência: 'auto' (tenta Apple MLX nativo ~200ms, fallback para JevK5), 'mlx' (Metal compilado), 'jevk5' (PyTorch MPS/CPU).",
+    )
+    parser.add_argument(
+        "--two-pass",
+        action="store_true",
+        default=False,
+        help="Executa 2 forward passes separados (1 para tema, 1 para veredito). Padrão é FUSED (1 único forward conjunto, 2x mais rápido).",
+    )
+    parser.add_argument(
+        "--filter-topics",
+        type=str,
+        default=None,
+        help="Filtra a checagem detalhada apenas para os tópicos indicados separados por vírgula (ex: 'saude,politica'). Outros tópicos recebem early exit.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Tamanho do lote para processamento agrupado.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Exibe detalhes estendidos no console durante a execução.",
@@ -265,17 +299,17 @@ def main():
     print_banner(input_path, output_path, args)
     logger.info("Log detalhado iniciado em: %s", log_file)
 
-    # 1. Carrega modelo Plumb-4B (Lazy loaded singleton)
-    logger.info("Carregando e aquecendo modelo Plumb-4B...")
-    classifier = get_plumb_classifier()
-    agent = classifier._ensure_loaded()
-    if agent is None:
-        sys.exit("❌ Falha crítica: Não foi possível carregar o modelo Plumb-4B via JevK5.")
-    logger.info("Modelo Plumb-4B pronto para inferência.")
-
-    # 2. Inicializa o condensador de alegações
+    # 1. Carrega modelo Plumb-4B com motor selecionado (MLX ou JevK5)
+    logger.info("Inicializando motor Plumb-4B (engine=%s)...", args.engine)
+    filter_topics = [t.strip() for t in args.filter_topics.split(",")] if args.filter_topics else None
     condenser = ClaimCondenser()
-    generator = PlumbDatasetGenerator(classifier=classifier, condenser=condenser)
+    generator = PlumbDatasetGenerator(
+        engine=args.engine,
+        fused=(not args.two_pass),
+        target_topics=filter_topics,
+        condenser=condenser,
+    )
+    logger.info("Motor neural pronto e aquecido.")
 
     # 3. Detecta delimitador e cabeçalhos
     delimiter = args.delimiter or PlumbDatasetGenerator.detect_delimiter(input_path)
@@ -344,42 +378,34 @@ def main():
                 logger.info("Coluna de ID selecionada: '%s'", id_col)
 
             records_since_flush = 0
+            batch_buffer: list[dict[str, Any]] = []
 
-            for idx, row in enumerate(reader, start=1):
-                if idx <= args.offset:
-                    continue
+            def flush_batch_records(items_to_process: list[dict[str, Any]]):
+                nonlocal records_since_flush
+                if not items_to_process:
+                    return
 
-                if args.limit and stats["total_news_read"] >= args.limit:
-                    logger.info("Limite de %d notícias atingido.", args.limit)
-                    break
-
-                raw_id = str(row.get(id_col, idx)).strip() if id_col else str(idx)
-                if args.resume and raw_id in processed_ids:
-                    stats["total_skipped_resume"] += 1
-                    continue
-
-                raw_text = str(row.get(text_col, "")).strip()
-                raw_title = str(row.get(title_col, "")).strip() if title_col else None
-
-                if not raw_text and not raw_title:
-                    logger.debug("Linha #%d ignorada: texto e título vazios.", idx)
-                    continue
-
-                stats["total_news_read"] += 1
-                t0_item = time.perf_counter()
-
-                # Processa item (extração de alegações + classificação com Plumb-4B)
-                records = generator.process_item(
-                    item_id=raw_id,
-                    raw_text=raw_text,
-                    title=raw_title,
-                    strategy=args.strategy,
-                    max_claims=args.max_claims_per_news,
-                    extra_meta={k: v for k, v in row.items() if k not in (text_col, title_col, id_col)},
-                )
-
-                item_dur = time.perf_counter() - t0_item
-                stats["times"].append(item_dur)
+                t0_batch = time.perf_counter()
+                if len(items_to_process) == 1:
+                    item = items_to_process[0]
+                    records = generator.process_item(
+                        item_id=item["id"],
+                        raw_text=item["text"],
+                        title=item.get("title"),
+                        strategy=args.strategy,
+                        max_claims=args.max_claims_per_news,
+                        extra_meta=item.get("extra_meta"),
+                    )
+                else:
+                    records = generator.process_batch(
+                        items_to_process,
+                        strategy=args.strategy,
+                        max_claims=args.max_claims_per_news,
+                    )
+                batch_dur = time.perf_counter() - t0_batch
+                avg_item_dur = batch_dur / len(items_to_process)
+                for _ in items_to_process:
+                    stats["times"].append(avg_item_dur)
 
                 for r in records:
                     stats["total_claims_generated"] += 1
@@ -407,7 +433,7 @@ def main():
                     records_since_flush += 1
 
                     # Log detalhado por item
-                    v_icon = "✅ V" if r.veredito == "V" else "❌ F"
+                    v_icon = "✅ V" if r.veredito == "V" else ("❌ F" if r.veredito == "F" else "⚪ " + r.veredito)
                     log_msg = (
                         f"[{datetime.now().strftime('%H:%M:%S')}] #{stats['total_news_read']} ID:{r.id} | "
                         f"🎯 Alegação: \"{r.alegacao[:70]}{'...' if len(r.alegacao)>70 else ''}\" | "
@@ -426,6 +452,43 @@ def main():
                     if jsonl_file:
                         jsonl_file.flush()
                     records_since_flush = 0
+
+            for idx, row in enumerate(reader, start=1):
+                if idx <= args.offset:
+                    continue
+
+                if args.limit and stats["total_news_read"] >= args.limit:
+                    logger.info("Limite de %d notícias atingido.", args.limit)
+                    break
+
+                raw_id = str(row.get(id_col, idx)).strip() if id_col else str(idx)
+                if args.resume and raw_id in processed_ids:
+                    stats["total_skipped_resume"] += 1
+                    continue
+
+                raw_text = str(row.get(text_col, "")).strip()
+                raw_title = str(row.get(title_col, "")).strip() if title_col else None
+
+                if not raw_text and not raw_title:
+                    logger.debug("Linha #%d ignorada: texto e título vazios.", idx)
+                    continue
+
+                stats["total_news_read"] += 1
+                batch_buffer.append({
+                    "id": raw_id,
+                    "text": raw_text,
+                    "title": raw_title,
+                    "extra_meta": {k: v for k, v in row.items() if k not in (text_col, title_col, id_col)},
+                })
+
+                if len(batch_buffer) >= args.batch_size:
+                    flush_batch_records(batch_buffer)
+                    batch_buffer = []
+
+            # Flush remaining items
+            if batch_buffer:
+                flush_batch_records(batch_buffer)
+                batch_buffer = []
 
     except KeyboardInterrupt:
         logger.warning("\n⚠️ Processamento interrompido pelo usuário (Ctrl+C). Salvando checkpoint...")

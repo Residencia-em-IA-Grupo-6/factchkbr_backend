@@ -22,9 +22,11 @@ from pydantic import BaseModel, Field
 
 from app.services.plumb_classifier import (
     PlumbBinaryResult,
+    PlumbFusedResult,
     PlumbTopicClassifier,
     PlumbTopicResult,
     get_plumb_classifier,
+    get_plumb_classifier_engine,
 )
 
 logger = logging.getLogger("factchkbr.services.plumb_dataset_generator")
@@ -213,11 +215,17 @@ class PlumbDatasetGenerator:
 
     def __init__(
         self,
-        classifier: PlumbTopicClassifier | None = None,
+        classifier: Any = None,
         condenser: ClaimCondenser | None = None,
+        engine: str = "auto",
+        fused: bool = True,
+        target_topics: list[str] | None = None,
     ) -> None:
-        self.classifier = classifier or get_plumb_classifier()
+        self.engine = engine
+        self.classifier = classifier or get_plumb_classifier_engine(engine)
         self.condenser = condenser or ClaimCondenser()
+        self.fused = fused
+        self.target_topics = [t.lower().strip() for t in (target_topics or [])]
 
     @staticmethod
     def detect_delimiter(file_path: str | Path, sample_bytes: int = 8192) -> str:
@@ -269,7 +277,6 @@ class PlumbDatasetGenerator:
         # 3. Fallback: primeira coluna não-id ou primeira coluna disponível
         return non_id_headers[0] if non_id_headers else (headers[0] if headers else "text")
 
-
     def process_item(
         self,
         item_id: str | int,
@@ -282,9 +289,9 @@ class PlumbDatasetGenerator:
         """
         Processa uma única notícia:
         1. Condensa em 1..N alegações curtas (CPU).
-        2. Para cada alegação, roda Plumb-4B para Tema e Veredito (V/F).
+        2. Se fused=True, roda 1 único forward pass de Tema + Veredito (50% menos latência).
+        3. Se target_topics estiver ativo, aplica Early Exit para tópicos irrelevantes.
         """
-        t0 = time.perf_counter()
         claims = self.condenser.extract_claims(
             text=raw_text,
             title=title,
@@ -293,21 +300,77 @@ class PlumbDatasetGenerator:
         )
 
         if not claims:
-            # Garante que haja ao menos uma alegação para avaliar
             claims = [ClaimCondenser.clean_raw_text(raw_text)[:200]]
 
         records: list[PlumbDatasetRecord] = []
         for claim in claims:
             t_claim_start = time.perf_counter()
 
-            # 1. Classificação do Tema
+            # MODO 1: Fused Decision (1 único forward pass conjunto)
+            if self.fused and hasattr(self.classifier, "decide_fused"):
+                fused_res: PlumbFusedResult | None = self.classifier.decide_fused(claim)
+                if fused_res is not None:
+                    topic = fused_res.topic
+                    topic_conf = fused_res.topic_confidence
+                    verdict = fused_res.verdict
+                    verdict_conf = fused_res.verdict_confidence
+                    p_v = fused_res.prob_v
+                    p_f = fused_res.prob_f
+                    topic_probs = fused_res.topic_probabilities
+
+                    # Filtragem Condicional: se fora dos target_topics, marca neutro
+                    if self.target_topics and topic.lower() not in self.target_topics:
+                        verdict = "INCONCLUSIVO"
+                        verdict_conf = 0.50
+
+                    dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
+                    records.append(
+                        PlumbDatasetRecord(
+                            id=item_id,
+                            noticia_original=raw_text[:1000],
+                            alegacao=claim,
+                            tema=topic,
+                            tema_confianca=topic_conf,
+                            veredito=verdict,
+                            veredito_confianca=verdict_conf,
+                            prob_v=p_v,
+                            prob_f=p_f,
+                            probabilidades_tema_json=json.dumps(topic_probs, ensure_ascii=False),
+                            tempo_processamento_ms=dur_ms,
+                            metadados_extras=extra_meta or {},
+                        )
+                    )
+                    continue
+
+            # MODO 2: Two-Pass com Early Exit
+            # Passo 2.1: Tema
             topic_res = self.classifier.classify(claim)
             topic = topic_res.topic if topic_res else "Outros"
             topic_conf = topic_res.confidence if topic_res else 0.50
             topic_probs = topic_res.probabilities if topic_res else {}
 
-            # 2. Veredito Binário (V ou F)
-            # Passa o título/contexto da matéria para calibrar a decisão se disponível
+            # Filtragem Condicional / Early Exit: se o tema estiver fora dos alvos, pula o 2º forward pass!
+            if self.target_topics and topic.lower() not in self.target_topics:
+                dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
+                records.append(
+                    PlumbDatasetRecord(
+                        id=item_id,
+                        noticia_original=raw_text[:1000],
+                        alegacao=claim,
+                        tema=topic,
+                        tema_confianca=topic_conf,
+                        veredito="OUT_OF_SCOPE",
+                        veredito_confianca=topic_conf,
+                        prob_v=0.50,
+                        prob_f=0.50,
+                        probabilidades_tema_json=json.dumps(topic_probs, ensure_ascii=False),
+                        tempo_processamento_ms=dur_ms,
+                        metadados_extras=extra_meta or {},
+                    )
+                )
+                continue
+
+            # Passo 2.2: Veredito Binário V/F
             context_hint = title if (title and title != claim) else None
             binary_res = self.classifier.evaluate_claim_binary(claim, context=context_hint)
             verdict = binary_res.verdict if binary_res else "F"
@@ -316,21 +379,121 @@ class PlumbDatasetGenerator:
             p_f = binary_res.prob_false if binary_res else 0.50
 
             dur_ms = round((time.perf_counter() - t_claim_start) * 1000.0, 2)
-
-            rec = PlumbDatasetRecord(
-                id=item_id,
-                noticia_original=raw_text[:1000],
-                alegacao=claim,
-                tema=topic,
-                tema_confianca=topic_conf,
-                veredito=verdict,
-                veredito_confianca=verdict_conf,
-                prob_v=p_v,
-                prob_f=p_f,
-                probabilidades_tema_json=json.dumps(topic_probs, ensure_ascii=False),
-                tempo_processamento_ms=dur_ms,
-                metadados_extras=extra_meta or {},
+            records.append(
+                PlumbDatasetRecord(
+                    id=item_id,
+                    noticia_original=raw_text[:1000],
+                    alegacao=claim,
+                    tema=topic,
+                    tema_confianca=topic_conf,
+                    veredito=verdict,
+                    veredito_confianca=verdict_conf,
+                    prob_v=p_v,
+                    prob_f=p_f,
+                    probabilidades_tema_json=json.dumps(topic_probs, ensure_ascii=False),
+                    tempo_processamento_ms=dur_ms,
+                    metadados_extras=extra_meta or {},
+                )
             )
-            records.append(rec)
 
         return records
+
+    def process_batch(
+        self,
+        batch: list[dict[str, Any]],
+        strategy: str = "lead",
+        max_claims: int = 1,
+    ) -> list[PlumbDatasetRecord]:
+        """
+        Processa um lote de itens agrupados utilizando batching paralelo no motor neural
+        quando disponível (Estratégia 1: Batching Paralelo).
+        """
+        if not batch:
+            return []
+
+        # Se o classificador suportar batch_decide_fused e estiver em modo fused:
+        if self.fused and hasattr(self.classifier, "batch_decide_fused"):
+            # 1. Extração rápida de alegações via CPU para todos os itens do lote
+            extracted_items: list[tuple[dict[str, Any], str]] = []
+            for item in batch:
+                raw_text = item.get("text", "")
+                title = item.get("title")
+                claims = self.condenser.extract_claims(
+                    text=raw_text,
+                    title=title,
+                    max_claims=max_claims,
+                    strategy=strategy,
+                )
+                if not claims:
+                    claims = [ClaimCondenser.clean_raw_text(raw_text)[:200]]
+                for c in claims:
+                    extracted_items.append((item, c))
+
+            if not extracted_items:
+                return []
+
+            claims_list = [c for _, c in extracted_items]
+            t0 = time.perf_counter()
+            fused_results = self.classifier.batch_decide_fused(claims_list)
+            dur_total_ms = (time.perf_counter() - t0) * 1000.0
+            dur_per_claim_ms = round(dur_total_ms / max(len(claims_list), 1), 2)
+
+            batch_records: list[PlumbDatasetRecord] = []
+            for (item, claim), fused_res in zip(extracted_items, fused_results):
+                if fused_res is None:
+                    # Fallback individual caso algum item específico falhe
+                    fallback_recs = self.process_item(
+                        item_id=item["id"],
+                        raw_text=item["text"],
+                        title=item.get("title"),
+                        strategy=strategy,
+                        max_claims=max_claims,
+                        extra_meta=item.get("extra_meta"),
+                    )
+                    batch_records.extend(fallback_recs)
+                    continue
+
+                topic = fused_res.topic
+                topic_conf = fused_res.topic_confidence
+                verdict = fused_res.verdict
+                verdict_conf = fused_res.verdict_confidence
+                p_v = fused_res.prob_v
+                p_f = fused_res.prob_f
+                topic_probs = fused_res.topic_probabilities
+
+                if self.target_topics and topic.lower() not in self.target_topics:
+                    verdict = "INCONCLUSIVO"
+                    verdict_conf = 0.50
+
+                batch_records.append(
+                    PlumbDatasetRecord(
+                        id=item["id"],
+                        noticia_original=item["text"][:1000],
+                        alegacao=claim,
+                        tema=topic,
+                        tema_confianca=topic_conf,
+                        veredito=verdict,
+                        veredito_confianca=verdict_conf,
+                        prob_v=p_v,
+                        prob_f=p_f,
+                        probabilidades_tema_json=json.dumps(topic_probs, ensure_ascii=False),
+                        tempo_processamento_ms=dur_per_claim_ms,
+                        metadados_extras=item.get("extra_meta") or {},
+                    )
+                )
+            return batch_records
+
+        # Fallback sequencial se o classificador não suportar batching ou for modo two-pass
+        all_records: list[PlumbDatasetRecord] = []
+        for item in batch:
+            recs = self.process_item(
+                item_id=item["id"],
+                raw_text=item["text"],
+                title=item.get("title"),
+                strategy=strategy,
+                max_claims=max_claims,
+                extra_meta=item.get("extra_meta"),
+            )
+            all_records.extend(recs)
+        return all_records
+
