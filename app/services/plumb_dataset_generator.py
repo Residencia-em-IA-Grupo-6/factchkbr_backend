@@ -39,7 +39,7 @@ logger = logging.getLogger("factchkbr.services.plumb_dataset_generator")
 RE_HTML_TAGS = re.compile(r"<[^>]+>")
 RE_URLS = re.compile(r"https?://\S+|www\.\S+")
 RE_JOURNALISTIC_CREDITS = re.compile(
-    r"^(?:(?:Foto|Imagem|Crédito|Fonte|Por|Da Redação|Agência|Reportagem|Publicado em)[^:\n]*:?\s*)+",
+    r"^(?:(?:(?:Foto(?:grafia)?|Imagem|Cr[eé]dito|Fonte|Por|Reportagem)\s*:[^\n.]*[.]?\s*)|(?:Da Reda[cç][aã]o\s*[:-]?\s*)|(?:Publicado em\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s*))+",
     re.IGNORECASE,
 )
 RE_CLEAN_HEADER = re.compile(
